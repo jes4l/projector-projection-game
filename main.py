@@ -66,7 +66,7 @@ class CameraWidget(QMainWindow):
         self.sliderOverlay.setStyleSheet(
             "background-color: rgba(40, 40, 40, 230); border: none;")
         self.sliderOverlay.setVisible(False)
-        self.sliderOverlay.resize(300, 180)  # slightly taller to accommodate the new button
+        self.sliderOverlay.resize(300, 200)  # taller to accommodate the new button
 
         sliderLayout = QVBoxLayout(self.sliderOverlay)
         sliderLayout.setContentsMargins(10, 10, 10, 10)
@@ -107,7 +107,7 @@ class CameraWidget(QMainWindow):
         sliderLayout.addWidget(self.upperLabel)
         sliderLayout.addWidget(self.upperSlider)
 
-        # --- Auto Calibrate Button ---
+        # --- Auto Calibrate Button with feedback ---
         self.autoCalibrateButton = QPushButton("Auto Calibrate")
         self.autoCalibrateButton.setStyleSheet(
             "font-size:10pt; color: white; background-color: #444; border: none; padding: 5px;")
@@ -160,7 +160,9 @@ class CameraWidget(QMainWindow):
             self.edgesViewButton.setText("Edge Detection")
 
     def manualCalibrate(self):
-        """Reset calibration counters to force a new auto-calibration."""
+        """Reset calibration counters and start auto-calibration.
+           Also provide visual feedback on the button."""
+        self.autoCalibrateButton.setText("Autocalibrating")
         self.medianSum = 0.0
         self.medianCount = 0
         self.autoThresholdCalibrated = False
@@ -188,7 +190,10 @@ class CameraWidget(QMainWindow):
                 self.lowerSlider.setValue(lower_auto)
                 self.upperSlider.setValue(upper_auto)
                 self.autoThresholdCalibrated = True
+                self.autoCalibrateButton.setText("Autocalibrated")
                 print(f"Auto-calibrated thresholds: lower={lower_auto}, upper={upper_auto}")
+                # After 2 seconds, revert the button text back.
+                QTimer.singleShot(2000, lambda: self.autoCalibrateButton.setText("Auto Calibrate"))
 
         # Get thresholds from sliders.
         lower_val = self.lowerSlider.value()
@@ -207,8 +212,9 @@ class CameraWidget(QMainWindow):
             # Find contours and smooth bounding boxes.
             contours, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             newBoxes = []
+            # Lower the minimum contour area to 300 to allow small object detection.
             for cnt in contours:
-                if cv2.contourArea(cnt) > 1000:  # filter small contours
+                if cv2.contourArea(cnt) > 300:
                     newBoxes.append(cv2.boundingRect(cnt))
             smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
             self.prevBoxes = smoothedBoxes
@@ -299,4 +305,3 @@ if __name__ == "__main__":
     window = CameraWidget()
     window.show()
     sys.exit(app.exec_())
-
