@@ -36,6 +36,11 @@ class CameraWidget(QMainWindow):
         # This will hold the captured bounding box coordinates once auto calibration is done.
         self.capturedCoords = []
 
+        # For accumulating bounding boxes over a number of frames before freezing them.
+        self.bboxAcc = []       # list to accumulate lists of bounding boxes per frame
+        self.bboxCount = 0      # how many frames have been accumulated
+        self.freezeBoxes = False  # when True, stop updating boxes and use the averaged ones
+
         # --- Central Widget and Video Display ---
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
@@ -86,7 +91,7 @@ class CameraWidget(QMainWindow):
         self.upperSlider.setRange(0, 500)
         self.upperSlider.setValue(150)
 
-        # Connect slider changes to update the label texts.
+        # Connect slider changes to update the label texts and reset bbox accumulation.
         self.lowerSlider.valueChanged.connect(self.updateLowerLabel)
         self.upperSlider.valueChanged.connect(self.updateUpperLabel)
 
@@ -139,11 +144,23 @@ class CameraWidget(QMainWindow):
         # Install event filter for key presses ("h" to toggle overlays).
         self.installEventFilter(self)
 
+    def reset_bbox_accumulation(self):
+        """Reset the bounding box accumulation and unfreeze boxes."""
+        self.bboxAcc = []
+        self.bboxCount = 0
+        self.freezeBoxes = False
+
     def updateLowerLabel(self, value):
         self.lowerLabel.setText(f"Canny Lower Threshold: {value}")
+        # If thresholds are adjusted, restart bounding box averaging.
+        if self.freezeBoxes:
+            self.reset_bbox_accumulation()
 
     def updateUpperLabel(self, value):
         self.upperLabel.setText(f"Canny Upper Threshold: {value}")
+        # If thresholds are adjusted, restart bounding box averaging.
+        if self.freezeBoxes:
+            self.reset_bbox_accumulation()
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
@@ -174,12 +191,14 @@ class CameraWidget(QMainWindow):
 
     def manualCalibrate(self):
         """Reset calibration counters and start auto-calibration.
-           Also provide visual feedback on the button."""
+           Also provide visual feedback on the button and reset bbox averaging."""
         self.autoCalibrateButton.setText("Autocalibrating")
         self.medianSum = 0.0
         self.medianCount = 0
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
+        # Also reset bounding box averaging.
+        self.reset_bbox_accumulation()
 
     def updateFrame(self):
         ret, frame = self.cap.read()
@@ -253,15 +272,26 @@ class CameraWidget(QMainWindow):
         smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
         self.prevBoxes = smoothedBoxes
 
+        # --- Bounding Box Averaging ---
+        if not self.freezeBoxes:
+            # Accumulate current smoothed boxes if there is at least one detection.
+            if smoothedBoxes:
+                self.bboxAcc.append(smoothedBoxes)
+                self.bboxCount += 1
+            # After 10 frames, compute the average boxes.
+            if self.bboxCount >= 10:
+                averaged = self.average_bounding_boxes(self.bboxAcc)
+                self.capturedCoords = averaged
+                self.freezeBoxes = True
+                print("Averaged bounding boxes over 10 frames:", self.capturedCoords)
+        else:
+            # Once frozen, always use the captured (averaged) boxes.
+            smoothedBoxes = self.capturedCoords
+
         # Draw bounding boxes on the frame.
         for box in smoothedBoxes:
             x, y, w, h = box
             cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), thickness=2)
-
-        # If auto-calibration is complete, capture and print the bounding box coordinates.
-        if self.autoThresholdCalibrated:
-            self.capturedCoords = smoothedBoxes
-            print("Captured bounding boxes:", self.capturedCoords)
 
         # Toggle view: raw closed edge mask (for debugging) or the bounding box overlay.
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
@@ -282,6 +312,41 @@ class CameraWidget(QMainWindow):
             self.updateControlBarPosition()
         if self.sliderOverlay.isVisible():
             self.updateSliderOverlayPosition()
+
+    def average_bounding_boxes(self, bbox_list):
+        """
+        Given a list of lists of bounding boxes (each box is a tuple (x, y, w, h)),
+        compute an average bounding box for each object detected by matching each box in the
+        first frame with the closest box in subsequent frames.
+        """
+        if not bbox_list:
+            return []
+        reference_boxes = bbox_list[0]
+        averaged_boxes = []
+        # For each box in the reference frame, attempt to average with similar boxes from subsequent frames.
+        for ref_box in reference_boxes:
+            sum_x, sum_y, sum_w, sum_h = ref_box
+            count = 1
+            ref_center = (ref_box[0] + ref_box[2] / 2, ref_box[1] + ref_box[3] / 2)
+            for boxes in bbox_list[1:]:
+                best_match = None
+                best_dist = float('inf')
+                for box in boxes:
+                    center = (box[0] + box[2] / 2, box[1] + box[3] / 2)
+                    dist = np.hypot(center[0] - ref_center[0], center[1] - ref_center[1])
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_match = box
+                # If a matching box is found within a threshold distance, include it.
+                if best_match is not None and best_dist < 20:
+                    sum_x += best_match[0]
+                    sum_y += best_match[1]
+                    sum_w += best_match[2]
+                    sum_h += best_match[3]
+                    count += 1
+            averaged_box = (sum_x / count, sum_y / count, sum_w / count, sum_h / count)
+            averaged_boxes.append(averaged_box)
+        return averaged_boxes
 
     def smoothBoxes(self, newBoxes, prevBoxes, alpha=0.5, distance_threshold=20):
         """
