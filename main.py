@@ -5,7 +5,7 @@ from PyQt5.QtCore import Qt, QTimer, QEvent
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QPushButton,
-    QSlider, QVBoxLayout, QWidget, QDesktopWidget, QHBoxLayout
+    QSlider, QVBoxLayout, QWidget, QHBoxLayout
 )
 
 
@@ -32,8 +32,10 @@ class CameraWidget(QMainWindow):
 
         # This will hold the last processed frame (with bounding boxes).
         self.lastFrame = None
+        # Store the captured background frame.
+        self.background = None
 
-        # Flag to indicate whether capture is paused.
+        # Flag to indicate whether capture is paused (i.e. background captured).
         self.paused = False
 
         # --- Central Widget and Video Display ---
@@ -58,14 +60,14 @@ class CameraWidget(QMainWindow):
         controlLayout.setSpacing(10)
         self.thresholdButton = QPushButton("Canny Thresholds")
         self.edgesViewButton = QPushButton("Edge Detection")
-        # Create a Play button next to Edge Detection.
-        self.playButton = QPushButton("Play")
-        for btn in (self.thresholdButton, self.edgesViewButton, self.playButton):
+        # Renamed button: from "playButton" to "captureBackgroundButton"
+        self.captureBackgroundButton = QPushButton("Capture Background")
+        for btn in (self.thresholdButton, self.edgesViewButton, self.captureBackgroundButton):
             btn.setFixedSize(110, 30)
             btn.setStyleSheet("font-size:10pt; color: white; background-color: transparent; border: none;")
         controlLayout.addWidget(self.thresholdButton)
         controlLayout.addWidget(self.edgesViewButton)
-        controlLayout.addWidget(self.playButton)
+        controlLayout.addWidget(self.captureBackgroundButton)
         controlLayout.addStretch(1)
 
         # --- Threshold Slider Overlay ---
@@ -127,7 +129,7 @@ class CameraWidget(QMainWindow):
         # --- Connect Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
         self.edgesViewButton.clicked.connect(self.toggleEdgesMode)
-        self.playButton.clicked.connect(self.toggleCapture)
+        self.captureBackgroundButton.clicked.connect(self.toggleCaptureBackground)
 
         # --- OpenCV Camera Capture ---
         self.cap = cv2.VideoCapture(1)
@@ -185,30 +187,35 @@ class CameraWidget(QMainWindow):
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
 
-    def toggleCapture(self):
+    def toggleCaptureBackground(self):
         """
-        Toggle between freezing the current frame (pausing capture) and resuming live capture.
-        When paused, the last processed frame (with bounding boxes) is displayed.
+        Toggle between capturing the current frame as background and resuming live capture.
+        When not paused, the current processed frame is captured as background and displayed.
+        The button text briefly changes to "Captured" and then resets to "Capture Background" after 1 second.
+        When paused, live capture resumes.
         """
         if not self.paused:
-            # Pause: stop the timer and display the last frame.
+            # Capture background: freeze the live feed and store the current frame.
             self.timer.stop()
             self.paused = True
-            self.playButton.setText("Resume")
+            self.captureBackgroundButton.setText("Captured")
             if self.lastFrame is not None:
-                height, width, channel = self.lastFrame.shape
+                self.background = self.lastFrame.copy()
+                height, width, channel = self.background.shape
                 bytesPerLine = 3 * width
-                qImg = QImage(self.lastFrame.data, width, height, bytesPerLine, QImage.Format_BGR888)
+                qImg = QImage(self.background.data, width, height, bytesPerLine, QImage.Format_BGR888)
                 pixmap = QPixmap.fromImage(qImg)
                 self.videoLabel.setPixmap(pixmap.scaled(
                     self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
                 print("No processed frame available yet.")
+            # After 1 second, reset the button text back to "Capture Background"
+            QTimer.singleShot(1000, lambda: self.captureBackgroundButton.setText("Capture Background"))
         else:
-            # Resume: restart the timer.
+            # Resume live capture.
             self.timer.start(30)
             self.paused = False
-            self.playButton.setText("Play")
+            self.captureBackgroundButton.setText("Capture Background")
 
     def updateFrame(self):
         ret, frame = self.cap.read()
