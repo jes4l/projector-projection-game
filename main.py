@@ -32,15 +32,9 @@ class CameraWidget(QMainWindow):
 
         # This will hold the last processed frame (with bounding boxes).
         self.lastFrame = None
-        # This will hold the most recent bounding boxes detected in the last frame.
-        self.lastBoundingBoxes = []
-        # This will store the bounding boxes for the captured background.
-        self.backgroundBoxes = []
-        # Store the captured background frame.
-        self.background = None
 
-        # Flag to indicate whether capture is paused (i.e. background captured).
-        self.paused = False
+        # This will hold the captured bounding box coordinates once auto calibration is done.
+        self.capturedCoords = []
 
         # --- Central Widget and Video Display ---
         centralWidget = QWidget()
@@ -64,14 +58,11 @@ class CameraWidget(QMainWindow):
         controlLayout.setSpacing(10)
         self.thresholdButton = QPushButton("Canny Thresholds")
         self.edgesViewButton = QPushButton("Edge Detection")
-        # Renamed button: from "playButton" to "captureBackgroundButton"
-        self.captureBackgroundButton = QPushButton("Capture Background")
-        for btn in (self.thresholdButton, self.edgesViewButton, self.captureBackgroundButton):
+        for btn in (self.thresholdButton, self.edgesViewButton):
             btn.setFixedSize(110, 30)
             btn.setStyleSheet("font-size:10pt; color: white; background-color: transparent; border: none;")
         controlLayout.addWidget(self.thresholdButton)
         controlLayout.addWidget(self.edgesViewButton)
-        controlLayout.addWidget(self.captureBackgroundButton)
         controlLayout.addStretch(1)
 
         # --- Threshold Slider Overlay ---
@@ -133,7 +124,6 @@ class CameraWidget(QMainWindow):
         # --- Connect Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
         self.edgesViewButton.clicked.connect(self.toggleEdgesMode)
-        self.captureBackgroundButton.clicked.connect(self.toggleCaptureBackground)
 
         # --- OpenCV Camera Capture ---
         self.cap = cv2.VideoCapture(1)
@@ -191,41 +181,6 @@ class CameraWidget(QMainWindow):
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
 
-    def toggleCaptureBackground(self):
-        """
-        Toggle between capturing the current frame as background (with bounding boxes)
-        and resuming live capture.
-        When not paused, the current processed frame is captured as background,
-        and all detected bounding box coordinates are stored in self.backgroundBoxes.
-        The button text briefly changes to "Captured" and then resets to "Capture Background" after 1 second.
-        When paused, live capture resumes.
-        """
-        if not self.paused:
-            # Capture background: freeze the live feed and store the current frame.
-            self.timer.stop()
-            self.paused = True
-            self.captureBackgroundButton.setText("Captured")
-            if self.lastFrame is not None:
-                self.background = self.lastFrame.copy()
-                # Store the detected bounding boxes from the last frame.
-                self.backgroundBoxes = list(self.lastBoundingBoxes)
-                print("Captured bounding boxes:", self.backgroundBoxes)
-                height, width, channel = self.background.shape
-                bytesPerLine = 3 * width
-                qImg = QImage(self.background.data, width, height, bytesPerLine, QImage.Format_BGR888)
-                pixmap = QPixmap.fromImage(qImg)
-                self.videoLabel.setPixmap(pixmap.scaled(
-                    self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                print("No processed frame available yet.")
-            # After 1 second, reset the button text back to "Capture Background"
-            QTimer.singleShot(1000, lambda: self.captureBackgroundButton.setText("Capture Background"))
-        else:
-            # Resume live capture.
-            self.timer.start(30)
-            self.paused = False
-            self.captureBackgroundButton.setText("Capture Background")
-
     def updateFrame(self):
         ret, frame = self.cap.read()
         if not ret:
@@ -244,13 +199,18 @@ class CameraWidget(QMainWindow):
         # --- Auto-adjust thresholds on startup or when manually triggered ---
         if not self.autoThresholdCalibrated:
             median_val = np.median(blurred)
-            self.medianSum += median_val
+            # Scale the median so that the effective median is lower.
+            scale_factor = 0.26
+            calibrated_val = median_val * scale_factor
+
+            self.medianSum += calibrated_val
             self.medianCount += 1
             if self.medianCount >= self.autoAdjustFrames:
-                avg_median = self.medianSum / self.medianCount
-                sigma = 0.33
-                lower_auto = int(max(0, (1.0 - sigma) * avg_median))
-                upper_auto = int(min(255, (1.0 + sigma) * avg_median))
+                avg_calibrated = self.medianSum / self.medianCount
+                # Using sigma=0.36 to yield thresholds near 25 (lower) and 53 (upper)
+                sigma = 0.36
+                lower_auto = int(max(0, (1.0 - sigma) * avg_calibrated))
+                upper_auto = int(min(255, (1.0 + sigma) * avg_calibrated))
                 self.lowerSlider.setValue(lower_auto)
                 self.upperSlider.setValue(upper_auto)
                 self.autoThresholdCalibrated = True
@@ -292,18 +252,21 @@ class CameraWidget(QMainWindow):
         # Smooth bounding boxes with previous detections to reduce jitter.
         smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
         self.prevBoxes = smoothedBoxes
-        # Store the most recent bounding boxes.
-        self.lastBoundingBoxes = smoothedBoxes
 
         # Draw bounding boxes on the frame.
         for box in smoothedBoxes:
             x, y, w, h = box
             cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), thickness=2)
 
+        # If auto-calibration is complete, capture and print the bounding box coordinates.
+        if self.autoThresholdCalibrated:
+            self.capturedCoords = smoothedBoxes
+            print("Captured bounding boxes:", self.capturedCoords)
+
         # Toggle view: raw closed edge mask (for debugging) or the bounding box overlay.
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
 
-        # Save the processed frame so that it can be shown when paused.
+        # Save the processed frame.
         self.lastFrame = disp
 
         # Convert processed frame to QImage and display.
