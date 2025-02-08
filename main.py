@@ -72,16 +72,21 @@ class CameraWidget(QMainWindow):
         sliderLayout = QVBoxLayout(self.sliderOverlay)
         sliderLayout.setContentsMargins(10, 10, 10, 10)
         sliderLayout.setSpacing(10)
-        self.lowerLabel = QLabel("Canny Lower Threshold:")
+        # Create labels that will display the current threshold values.
+        self.lowerLabel = QLabel("Canny Lower Threshold: 50")
         self.lowerLabel.setStyleSheet("color: white;")
         self.lowerSlider = QSlider(Qt.Horizontal)
         self.lowerSlider.setRange(0, 500)
         self.lowerSlider.setValue(50)
-        self.upperLabel = QLabel("Canny Upper Threshold:")
+        self.upperLabel = QLabel("Canny Upper Threshold: 150")
         self.upperLabel.setStyleSheet("color: white;")
         self.upperSlider = QSlider(Qt.Horizontal)
         self.upperSlider.setRange(0, 500)
         self.upperSlider.setValue(150)
+
+        # Connect slider changes to update the label texts.
+        self.lowerSlider.valueChanged.connect(self.updateLowerLabel)
+        self.upperSlider.valueChanged.connect(self.updateUpperLabel)
 
         # Vibrant slider style (red-to-green gradient)
         slider_style = """
@@ -131,6 +136,12 @@ class CameraWidget(QMainWindow):
 
         # Install event filter for key presses ("h" to toggle overlays).
         self.installEventFilter(self)
+
+    def updateLowerLabel(self, value):
+        self.lowerLabel.setText(f"Canny Lower Threshold: {value}")
+
+    def updateUpperLabel(self, value):
+        self.upperLabel.setText(f"Canny Upper Threshold: {value}")
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
@@ -225,7 +236,7 @@ class CameraWidget(QMainWindow):
         frame_area = frame.shape[0] * frame.shape[1]
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # Filter out noise (very small areas) and avoid large false detections (e.g. the whole background).
+            # Filter out noise (very small areas) and avoid large false detections.
             if area < 100 or area > frame_area * 0.9:
                 continue
             x, y, w, h = cv2.boundingRect(cnt)
