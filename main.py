@@ -33,6 +33,9 @@ class CameraWidget(QMainWindow):
         # This will hold the last processed frame (with bounding boxes).
         self.lastFrame = None
 
+        # Flag to indicate whether capture is paused.
+        self.paused = False
+
         # --- Central Widget and Video Display ---
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
@@ -124,7 +127,7 @@ class CameraWidget(QMainWindow):
         # --- Connect Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
         self.edgesViewButton.clicked.connect(self.toggleEdgesMode)
-        self.playButton.clicked.connect(self.playImage)
+        self.playButton.clicked.connect(self.toggleCapture)
 
         # --- OpenCV Camera Capture ---
         self.cap = cv2.VideoCapture(1)
@@ -182,22 +185,30 @@ class CameraWidget(QMainWindow):
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
 
-    def playImage(self):
+    def toggleCapture(self):
         """
-        Stop further processing and display the last processed frame (which shows the bounding boxes).
+        Toggle between freezing the current frame (pausing capture) and resuming live capture.
+        When paused, the last processed frame (with bounding boxes) is displayed.
         """
-        # Stop the timer so that updateFrame stops being called.
-        self.timer.stop()
-        if self.lastFrame is not None:
-            # Convert the saved processed frame to QImage.
-            height, width, channel = self.lastFrame.shape
-            bytesPerLine = 3 * width
-            qImg = QImage(self.lastFrame.data, width, height, bytesPerLine, QImage.Format_BGR888)
-            pixmap = QPixmap.fromImage(qImg)
-            self.videoLabel.setPixmap(pixmap.scaled(
-                self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        if not self.paused:
+            # Pause: stop the timer and display the last frame.
+            self.timer.stop()
+            self.paused = True
+            self.playButton.setText("Resume")
+            if self.lastFrame is not None:
+                height, width, channel = self.lastFrame.shape
+                bytesPerLine = 3 * width
+                qImg = QImage(self.lastFrame.data, width, height, bytesPerLine, QImage.Format_BGR888)
+                pixmap = QPixmap.fromImage(qImg)
+                self.videoLabel.setPixmap(pixmap.scaled(
+                    self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                print("No processed frame available yet.")
         else:
-            print("No processed frame available yet.")
+            # Resume: restart the timer.
+            self.timer.start(30)
+            self.paused = False
+            self.playButton.setText("Play")
 
     def updateFrame(self):
         ret, frame = self.cap.read()
@@ -269,15 +280,12 @@ class CameraWidget(QMainWindow):
         # Draw bounding boxes on the frame.
         for box in smoothedBoxes:
             x, y, w, h = box
-            cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0, 255, 0), thickness=2)
+            cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), thickness=2)
 
         # Toggle view: raw closed edge mask (for debugging) or the bounding box overlay.
-        if self.edgesMode:
-            disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR)
-        else:
-            disp = frame
+        disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
 
-        # Save the processed frame so that it can be shown when Play is pressed.
+        # Save the processed frame so that it can be shown when paused.
         self.lastFrame = disp
 
         # Convert processed frame to QImage and display.
@@ -359,6 +367,6 @@ class CameraWidget(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CameraWidget()
-    # Use showMaximized() to scale up to the maximum size while keeping window decorations.
+    # Use showMaximized() so the window fills the screen but remains movable.
     window.showMaximized()
     sys.exit(app.exec_())
