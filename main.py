@@ -8,40 +8,55 @@ from PyQt5.QtWidgets import (
     QSlider, QVBoxLayout, QWidget, QHBoxLayout
 )
 
-
 class CameraWidget(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Game")
+        # Ensure the window gets key events.
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocus()
 
         # Use a modern font for the entire application.
         app_font = QFont("Segoe UI", 10)
         self.setFont(app_font)
 
-        # Toggle between raw edge mask view and bounding boxes view.
-        self.edgesMode = False
-
-        # For smoothing bounding boxes between frames.
-        self.prevBoxes = []
-
-        # Auto-calibration parameters.
-        self.autoAdjustFrames = 100  # number of frames to collect for calibration
+        # --------------------------
+        # Computer Vision Variables
+        # --------------------------
+        self.edgesMode = False               # Toggle raw edge mask vs. overlay view.
+        self.prevBoxes = []                  # For smoothing bounding boxes.
+        self.autoAdjustFrames = 100          # Number of frames for auto-calibration.
         self.medianSum = 0.0
         self.medianCount = 0
-        self.autoThresholdCalibrated = False  # once calibrated, stop auto-adjusting
+        self.autoThresholdCalibrated = False # Flag for auto calibration.
+        self.lastFrame = None                # Holds the last processed frame.
+        self.capturedCoords = []             # Holds averaged bounding boxes.
 
-        # This will hold the last processed frame (with bounding boxes).
-        self.lastFrame = None
+        # For accumulating bounding boxes over several frames.
+        self.bboxAcc = []        # List of lists of bounding boxes per frame.
+        self.bboxCount = 0       # How many frames accumulated.
+        self.freezeBoxes = False # When True, freeze bounding boxes (use averaged ones).
 
-        # This will hold the captured bounding box coordinates once auto calibration is done.
-        self.capturedCoords = []
+        # --------------------------
+        # Spawn / Gameplay Variables
+        # --------------------------
+        self.spawned = False     # Will be set True when the Spawn button is clicked.
+        self.sprite = None       # The player sprite image.
+        self.x_offset = 0        # Sprite horizontal position.
+        self.y_offset = 0        # Sprite vertical position.
+        self.ground_y = 0        # Calculated ground level.
+        self.move_step = 5       # Pixels moved per frame horizontally.
+        self.is_jumping = False  # Jump state.
+        self.jump_velocity = 0   # Current jump vertical velocity.
+        self.gravity = 1         # Gravity per frame.
+        # Dictionary to hold current key states.
+        self.key_state = {"a": False, "d": False, "space": False}
+        # When calibration is triggered while the sprite is visible, its position is saved.
+        self.savedSpritePos = None
 
-        # For accumulating bounding boxes over a number of frames before freezing them.
-        self.bboxAcc = []       # list to accumulate lists of bounding boxes per frame
-        self.bboxCount = 0      # how many frames have been accumulated
-        self.freezeBoxes = False  # when True, stop updating boxes and use the averaged ones
-
-        # --- Central Widget and Video Display ---
+        # --------------------------
+        # UI Setup
+        # --------------------------
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
         layout = QVBoxLayout(centralWidget)
@@ -53,7 +68,7 @@ class CameraWidget(QMainWindow):
         self.videoLabel.setStyleSheet("background-color: black;")
         layout.addWidget(self.videoLabel)
 
-        # --- Control Bar Overlay (with buttons) ---
+        # --- Control Bar Overlay ---
         self.controlBarOverlay = QWidget(self.videoLabel)
         self.controlBarOverlay.setStyleSheet("background-color: rgba(50, 50, 50, 230); border: none;")
         self.controlBarOverlay.setVisible(False)
@@ -63,23 +78,26 @@ class CameraWidget(QMainWindow):
         controlLayout.setSpacing(10)
         self.thresholdButton = QPushButton("Canny Thresholds")
         self.edgesViewButton = QPushButton("Edge Detection")
-        for btn in (self.thresholdButton, self.edgesViewButton):
+        self.spawnButton = QPushButton("Spawn")
+        # Disable auto-default so that keys like SPACE won’t trigger buttons.
+        for btn in (self.thresholdButton, self.edgesViewButton, self.spawnButton):
             btn.setFixedSize(110, 30)
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
             btn.setStyleSheet("font-size:10pt; color: white; background-color: transparent; border: none;")
         controlLayout.addWidget(self.thresholdButton)
         controlLayout.addWidget(self.edgesViewButton)
+        controlLayout.addWidget(self.spawnButton)
         controlLayout.addStretch(1)
 
         # --- Threshold Slider Overlay ---
         self.sliderOverlay = QWidget(self.videoLabel)
         self.sliderOverlay.setStyleSheet("background-color: rgba(40, 40, 40, 230); border: none;")
         self.sliderOverlay.setVisible(False)
-        self.sliderOverlay.resize(300, 200)  # taller to accommodate the new button
-
+        self.sliderOverlay.resize(300, 200)
         sliderLayout = QVBoxLayout(self.sliderOverlay)
         sliderLayout.setContentsMargins(10, 10, 10, 10)
         sliderLayout.setSpacing(10)
-        # Create labels that will display the current threshold values.
         self.lowerLabel = QLabel("Canny Lower Threshold: 50")
         self.lowerLabel.setStyleSheet("color: white;")
         self.lowerSlider = QSlider(Qt.Horizontal)
@@ -90,12 +108,9 @@ class CameraWidget(QMainWindow):
         self.upperSlider = QSlider(Qt.Horizontal)
         self.upperSlider.setRange(0, 500)
         self.upperSlider.setValue(150)
-
-        # Connect slider changes to update the label texts and reset bbox accumulation.
+        # Connect slider changes to update labels and trigger sprite hiding.
         self.lowerSlider.valueChanged.connect(self.updateLowerLabel)
         self.upperSlider.valueChanged.connect(self.updateUpperLabel)
-
-        # Vibrant slider style (red-to-green gradient)
         slider_style = """
             QSlider::groove:horizontal {
                 border: none;
@@ -114,56 +129,115 @@ class CameraWidget(QMainWindow):
         """
         self.lowerSlider.setStyleSheet(slider_style)
         self.upperSlider.setStyleSheet(slider_style)
-
         sliderLayout.addWidget(self.lowerLabel)
         sliderLayout.addWidget(self.lowerSlider)
         sliderLayout.addWidget(self.upperLabel)
         sliderLayout.addWidget(self.upperSlider)
-
-        # --- Auto Calibrate Button with feedback ---
         self.autoCalibrateButton = QPushButton("Auto Calibrate")
         self.autoCalibrateButton.setStyleSheet("font-size:10pt; color: white; background-color: #444; border: none; padding: 5px;")
+        self.autoCalibrateButton.setAutoDefault(False)
+        self.autoCalibrateButton.setDefault(False)
         self.autoCalibrateButton.clicked.connect(self.manualCalibrate)
         sliderLayout.addWidget(self.autoCalibrateButton)
 
-        # --- Connect Buttons ---
+        # --- Connect UI Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
         self.edgesViewButton.clicked.connect(self.toggleEdgesMode)
+        self.spawnButton.clicked.connect(self.spawnPlayer)
 
-        # --- OpenCV Camera Capture ---
+        # --------------------------
+        # OpenCV Camera Capture
+        # --------------------------
         self.cap = cv2.VideoCapture(1)
         if not self.cap.isOpened():
             print("Could not open camera")
             sys.exit()
-
-        # --- Timer for Updating Frames ---
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateFrame)
-        self.timer.start(30)  # roughly 30ms per frame (~30fps)
+        self.timer.start(30)  # roughly 30 fps
 
-        # Install event filter for key presses ("h" to toggle overlays).
         self.installEventFilter(self)
 
-    def reset_bbox_accumulation(self):
-        """Reset the bounding box accumulation and unfreeze boxes."""
-        self.bboxAcc = []
-        self.bboxCount = 0
-        self.freezeBoxes = False
+    # --------------------------
+    # Sprite & Gameplay Methods
+    # --------------------------
+    def spawnPlayer(self):
+        """Called when Spawn is clicked. Initializes gameplay if not already spawned."""
+        if not self.spawned:
+            self.spawned = True
+            self.reset_gameplay()
+            print("Player spawned!")
 
+    def reset_gameplay(self):
+        """Load and scale the sprite and initialize its movement variables.
+           If the sprite was hidden during calibration, its saved position is used."""
+        sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
+        self.sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
+        if self.sprite is None:
+            print(f"Error: Could not load sprite from {sprite_path}")
+            return
+        scale_factor = 0.2
+        new_width = int(self.sprite.shape[1] * scale_factor)
+        new_height = int(self.sprite.shape[0] * scale_factor)
+        self.sprite = cv2.resize(self.sprite, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        self.sprite_height, self.sprite_width = self.sprite.shape[:2]
+        # Set initial position; if we have a saved position, use it.
+        if self.savedSpritePos is not None:
+            self.x_offset, self.y_offset = self.savedSpritePos
+        else:
+            self.x_offset = 10
+            self.y_offset = 0
+        self.is_jumping = False
+        self.jump_velocity = 0
+        self.gravity = 1
+        self.move_step = 5
+        self.key_state = {"a": False, "d": False, "space": False}
+
+    def hideSprite(self):
+        """If the sprite is visible, save its current position and hide it immediately."""
+        if self.spawned:
+            self.savedSpritePos = (self.x_offset, self.y_offset)
+            self.spawned = False
+            self.sprite = None
+            print("Sprite hidden for calibration, saved position:", self.savedSpritePos)
+
+    def respawnSprite(self, pos):
+        """Respawn the sprite at the given position."""
+        self.savedSpritePos = None
+        self.spawned = True
+        self.reset_gameplay()  # This loads the sprite and resets variables.
+        # Override the position with the saved position.
+        self.x_offset, self.y_offset = pos
+        print("Sprite respawned at", pos)
+
+    # --------------------------
+    # UI Event Handlers
+    # --------------------------
     def updateLowerLabel(self, value):
         self.lowerLabel.setText(f"Canny Lower Threshold: {value}")
-        # If thresholds are adjusted, restart bounding box averaging.
+        # When thresholds change, if a sprite is active, hide it.
+        if self.spawned:
+            self.hideSprite()
         if self.freezeBoxes:
             self.reset_bbox_accumulation()
 
     def updateUpperLabel(self, value):
         self.upperLabel.setText(f"Canny Upper Threshold: {value}")
-        # If thresholds are adjusted, restart bounding box averaging.
+        # When thresholds change, if a sprite is active, hide it.
+        if self.spawned:
+            self.hideSprite()
         if self.freezeBoxes:
             self.reset_bbox_accumulation()
 
+    def reset_bbox_accumulation(self):
+        """Reset the bounding box accumulator so that averaging will restart."""
+        self.bboxAcc = []
+        self.bboxCount = 0
+        self.freezeBoxes = False
+
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
+            # Toggle the control bar overlay using the H key.
             if event.key() == Qt.Key_H:
                 visible = not self.controlBarOverlay.isVisible()
                 self.controlBarOverlay.setVisible(visible)
@@ -174,6 +248,26 @@ class CameraWidget(QMainWindow):
                     self.updateControlBarPosition()
                 return True
         return super().eventFilter(source, event)
+
+    def keyPressEvent(self, event):
+        if self.spawned:
+            if event.key() == Qt.Key_A:
+                self.key_state["a"] = True
+            elif event.key() == Qt.Key_D:
+                self.key_state["d"] = True
+            elif event.key() == Qt.Key_Space:
+                self.key_state["space"] = True
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        if self.spawned:
+            if event.key() == Qt.Key_A:
+                self.key_state["a"] = False
+            elif event.key() == Qt.Key_D:
+                self.key_state["d"] = False
+            elif event.key() == Qt.Key_Space:
+                self.key_state["space"] = False
+        super().keyReleaseEvent(event)
 
     def toggleSliderOverlay(self):
         visible = not self.sliderOverlay.isVisible()
@@ -191,43 +285,47 @@ class CameraWidget(QMainWindow):
 
     def manualCalibrate(self):
         """Reset calibration counters and start auto-calibration.
-           Also provide visual feedback on the button and reset bbox averaging."""
+           Also hide the sprite (if present) and reset bounding box averaging."""
+        if self.spawned:
+            self.hideSprite()
         self.autoCalibrateButton.setText("Autocalibrating")
         self.medianSum = 0.0
         self.medianCount = 0
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
-        # Also reset bounding box averaging.
         self.reset_bbox_accumulation()
 
+    def onCalibrationComplete(self):
+        """Called after auto-calibration delay; resets button text and respawns sprite if needed."""
+        self.autoCalibrateButton.setText("Auto Calibrate")
+        if self.savedSpritePos is not None:
+            self.respawnSprite(self.savedSpritePos)
+        self.reset_bbox_accumulation()
+
+    # --------------------------
+    # Frame Processing
+    # --------------------------
     def updateFrame(self):
         ret, frame = self.cap.read()
         if not ret:
             return
 
-        # Convert frame to grayscale.
+        # Process for edge detection:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Enhance contrast using CLAHE.
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_equalized = clahe.apply(gray)
-
-        # Apply Gaussian blur to reduce noise.
         blurred = cv2.GaussianBlur(gray_equalized, (5, 5), 0)
 
-        # --- Auto-adjust thresholds on startup or when manually triggered ---
+        # --- Auto-adjust thresholds (if not already calibrated) ---
         if not self.autoThresholdCalibrated:
             median_val = np.median(blurred)
-            # Scale the median so that the effective median is lower.
             scale_factor = 0.26
             calibrated_val = median_val * scale_factor
-
             self.medianSum += calibrated_val
             self.medianCount += 1
             if self.medianCount >= self.autoAdjustFrames:
                 avg_calibrated = self.medianSum / self.medianCount
-                # Using sigma=0.36 to yield thresholds near 25 (lower) and 53 (upper)
-                sigma = 0.36
+                sigma = 0.36  # yields thresholds near 25 (lower) and 53 (upper)
                 lower_auto = int(max(0, (1.0 - sigma) * avg_calibrated))
                 upper_auto = int(min(255, (1.0 + sigma) * avg_calibrated))
                 self.lowerSlider.setValue(lower_auto)
@@ -235,79 +333,103 @@ class CameraWidget(QMainWindow):
                 self.autoThresholdCalibrated = True
                 self.autoCalibrateButton.setText("Autocalibrated")
                 print(f"Auto-calibrated thresholds: lower={lower_auto}, upper={upper_auto}")
-                QTimer.singleShot(2000, lambda: self.autoCalibrateButton.setText("Auto Calibrate"))
+                QTimer.singleShot(2000, self.onCalibrationComplete)
 
-        # Get thresholds from sliders.
         lower_val = self.lowerSlider.value()
         upper_val = self.upperSlider.value()
-
-        # --- Dual Edge Detection ---
         edges = cv2.Canny(blurred, lower_val, upper_val)
         inverted = cv2.bitwise_not(blurred)
         inverted_edges = cv2.Canny(inverted, lower_val, upper_val)
         combined_edges = cv2.bitwise_or(edges, inverted_edges)
-
-        # Apply morphological closing to connect broken edges.
         kernel = np.ones((7, 7), np.uint8)
         closed_edges = cv2.morphologyEx(combined_edges, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-        # Dilate the mask slightly to join nearby edge segments.
         dilate_kernel = np.ones((5, 5), np.uint8)
         dilated_mask = cv2.dilate(closed_edges, dilate_kernel, iterations=1)
-
-        # Find contours in the dilated mask.
         contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         newBoxes = []
         frame_area = frame.shape[0] * frame.shape[1]
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # Filter out noise (very small areas) and avoid large false detections.
             if area < 100 or area > frame_area * 0.9:
                 continue
             x, y, w, h = cv2.boundingRect(cnt)
             newBoxes.append((x, y, w, h))
-
-        # Smooth bounding boxes with previous detections to reduce jitter.
         smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
         self.prevBoxes = smoothedBoxes
 
-        # --- Bounding Box Averaging ---
-        if not self.freezeBoxes:
-            # Accumulate current smoothed boxes if there is at least one detection.
-            if smoothedBoxes:
-                self.bboxAcc.append(smoothedBoxes)
-                self.bboxCount += 1
-            # After 10 frames, compute the average boxes.
-            if self.bboxCount >= 10:
-                averaged = self.average_bounding_boxes(self.bboxAcc)
-                self.capturedCoords = averaged
-                self.freezeBoxes = True
-                print("Averaged bounding boxes over 10 frames:", self.capturedCoords)
+        # --- Bounding Box Averaging (only if sprite is not spawned) ---
+        if not self.spawned:
+            if not self.freezeBoxes:
+                if smoothedBoxes:
+                    self.bboxAcc.append(smoothedBoxes)
+                    self.bboxCount += 1
+                if self.bboxCount >= 10:
+                    averaged = self.average_bounding_boxes(self.bboxAcc)
+                    self.capturedCoords = averaged
+                    self.freezeBoxes = True
+                    print("Averaged bounding boxes over 10 frames:", self.capturedCoords)
+            else:
+                smoothedBoxes = self.capturedCoords
         else:
-            # Once frozen, always use the captured (averaged) boxes.
-            smoothedBoxes = self.capturedCoords
+            # In spawn mode, ignore bounding boxes.
+            smoothedBoxes = []
 
-        # Draw bounding boxes on the frame.
-        for box in smoothedBoxes:
-            x, y, w, h = box
-            cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), thickness=2)
+        # Draw bounding boxes (only if not spawned)
+        if not self.spawned:
+            for box in smoothedBoxes:
+                x, y, w, h = box
+                cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), thickness=2)
 
-        # Toggle view: raw closed edge mask (for debugging) or the bounding box overlay.
+        # --------------
+        # Gameplay Code
+        # --------------
+        if self.spawned:
+            # Calculate ground level based on current frame height.
+            ground_y = frame.shape[0] - self.sprite_height
+            self.ground_y = ground_y
+            # Horizontal movement:
+            if self.key_state.get("a", False):
+                self.x_offset -= self.move_step
+            if self.key_state.get("d", False):
+                self.x_offset += self.move_step
+            self.x_offset = max(0, min(self.x_offset, frame.shape[1] - self.sprite_width))
+            # Jumping:
+            if not self.is_jumping:
+                self.y_offset = ground_y
+            if self.key_state.get("space", False) and not self.is_jumping:
+                self.is_jumping = True
+                self.jump_velocity = -15
+                self.key_state["space"] = False  # consume the key
+            if self.is_jumping:
+                self.y_offset += self.jump_velocity
+                self.jump_velocity += self.gravity
+                if self.y_offset >= ground_y:
+                    self.y_offset = ground_y
+                    self.is_jumping = False
+                    self.jump_velocity = 0
+            # Overlay the sprite onto the frame.
+            if self.sprite is not None:
+                if self.sprite.shape[2] == 4:
+                    sprite_bgr = self.sprite[:, :, :3]
+                    alpha_channel = self.sprite[:, :, 3] / 255.0
+                    alpha = np.dstack([alpha_channel] * 3)
+                    roi = frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width]
+                    blended = (alpha * sprite_bgr.astype(float) + (1 - alpha) * roi.astype(float)).astype(np.uint8)
+                    frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = blended
+                else:
+                    frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = self.sprite
+
+        # --------------------
+        # Display the Frame
+        # --------------------
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
-
-        # Save the processed frame.
         self.lastFrame = disp
-
-        # Convert processed frame to QImage and display.
         height, width, channel = disp.shape
         bytesPerLine = 3 * width
         qImg = QImage(disp.data, width, height, bytesPerLine, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qImg)
-        self.videoLabel.setPixmap(pixmap.scaled(
-            self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.videoLabel.setPixmap(pixmap.scaled(self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-        # Update overlay positions if visible.
         if self.controlBarOverlay.isVisible():
             self.updateControlBarPosition()
         if self.sliderOverlay.isVisible():
@@ -316,14 +438,12 @@ class CameraWidget(QMainWindow):
     def average_bounding_boxes(self, bbox_list):
         """
         Given a list of lists of bounding boxes (each box is a tuple (x, y, w, h)),
-        compute an average bounding box for each object detected by matching each box in the
-        first frame with the closest box in subsequent frames.
+        compute an average bounding box for each object using the first frame as reference.
         """
         if not bbox_list:
             return []
         reference_boxes = bbox_list[0]
         averaged_boxes = []
-        # For each box in the reference frame, attempt to average with similar boxes from subsequent frames.
         for ref_box in reference_boxes:
             sum_x, sum_y, sum_w, sum_h = ref_box
             count = 1
@@ -337,7 +457,6 @@ class CameraWidget(QMainWindow):
                     if dist < best_dist:
                         best_dist = dist
                         best_match = box
-                # If a matching box is found within a threshold distance, include it.
                 if best_match is not None and best_dist < 20:
                     sum_x += best_match[0]
                     sum_y += best_match[1]
@@ -383,9 +502,9 @@ class CameraWidget(QMainWindow):
         return smoothed
 
     def updateControlBarPosition(self):
-        margin = 0  # span edge-to-edge
+        margin = 0
         width = self.videoLabel.width()
-        height = 40  # fixed height for the control bar
+        height = 40
         self.controlBarOverlay.setGeometry(margin, margin, width, height)
 
     def updateSliderOverlayPosition(self):
@@ -397,8 +516,7 @@ class CameraWidget(QMainWindow):
 
     def resizeEvent(self, event):
         if self.videoLabel.pixmap():
-            self.videoLabel.setPixmap(self.videoLabel.pixmap().scaled(
-                self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.videoLabel.setPixmap(self.videoLabel.pixmap().scaled(self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
         if self.controlBarOverlay.isVisible():
             self.updateControlBarPosition()
         if self.sliderOverlay.isVisible():
@@ -409,10 +527,8 @@ class CameraWidget(QMainWindow):
         self.cap.release()
         event.accept()
 
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CameraWidget()
-    # Use showMaximized() so the window fills the screen but remains movable.
     window.showMaximized()
     sys.exit(app.exec_())
