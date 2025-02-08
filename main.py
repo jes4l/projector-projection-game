@@ -18,10 +18,6 @@ class CameraWidget(QMainWindow):
         app_font = QFont("Segoe UI", 10)
         self.setFont(app_font)
 
-        # Dynamically set the window size (80% of available screen size)
-        screen = QDesktopWidget().availableGeometry()
-        self.resize(int(screen.width() * 0.8), int(screen.height() * 0.8))
-
         # Toggle between raw edge mask view and bounding boxes view.
         self.edgesMode = False
 
@@ -33,6 +29,9 @@ class CameraWidget(QMainWindow):
         self.medianSum = 0.0
         self.medianCount = 0
         self.autoThresholdCalibrated = False  # once calibrated, stop auto-adjusting
+
+        # This will hold the last processed frame (with bounding boxes).
+        self.lastFrame = None
 
         # --- Central Widget and Video Display ---
         centralWidget = QWidget()
@@ -56,11 +55,14 @@ class CameraWidget(QMainWindow):
         controlLayout.setSpacing(10)
         self.thresholdButton = QPushButton("Canny Thresholds")
         self.edgesViewButton = QPushButton("Edge Detection")
-        for btn in (self.thresholdButton, self.edgesViewButton):
+        # Create a Play button next to Edge Detection.
+        self.playButton = QPushButton("Play")
+        for btn in (self.thresholdButton, self.edgesViewButton, self.playButton):
             btn.setFixedSize(110, 30)
             btn.setStyleSheet("font-size:10pt; color: white; background-color: transparent; border: none;")
         controlLayout.addWidget(self.thresholdButton)
         controlLayout.addWidget(self.edgesViewButton)
+        controlLayout.addWidget(self.playButton)
         controlLayout.addStretch(1)
 
         # --- Threshold Slider Overlay ---
@@ -122,6 +124,7 @@ class CameraWidget(QMainWindow):
         # --- Connect Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
         self.edgesViewButton.clicked.connect(self.toggleEdgesMode)
+        self.playButton.clicked.connect(self.playImage)
 
         # --- OpenCV Camera Capture ---
         self.cap = cv2.VideoCapture(1)
@@ -178,6 +181,23 @@ class CameraWidget(QMainWindow):
         self.medianCount = 0
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
+
+    def playImage(self):
+        """
+        Stop further processing and display the last processed frame (which shows the bounding boxes).
+        """
+        # Stop the timer so that updateFrame stops being called.
+        self.timer.stop()
+        if self.lastFrame is not None:
+            # Convert the saved processed frame to QImage.
+            height, width, channel = self.lastFrame.shape
+            bytesPerLine = 3 * width
+            qImg = QImage(self.lastFrame.data, width, height, bytesPerLine, QImage.Format_BGR888)
+            pixmap = QPixmap.fromImage(qImg)
+            self.videoLabel.setPixmap(pixmap.scaled(
+                self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            print("No processed frame available yet.")
 
     def updateFrame(self):
         ret, frame = self.cap.read()
@@ -256,6 +276,9 @@ class CameraWidget(QMainWindow):
             disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR)
         else:
             disp = frame
+
+        # Save the processed frame so that it can be shown when Play is pressed.
+        self.lastFrame = disp
 
         # Convert processed frame to QImage and display.
         height, width, channel = disp.shape
@@ -336,5 +359,6 @@ class CameraWidget(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CameraWidget()
-    window.show()
+    # Use showMaximized() to scale up to the maximum size while keeping window decorations.
+    window.showMaximized()
     sys.exit(app.exec_())
