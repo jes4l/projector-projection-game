@@ -1,7 +1,6 @@
 import sys
 import cv2
 import numpy as np
-from collections import deque
 from PyQt5.QtCore import Qt, QTimer, QEvent
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
@@ -23,16 +22,17 @@ class CameraWidget(QMainWindow):
         screen = QDesktopWidget().availableGeometry()
         self.resize(int(screen.width() * 0.8), int(screen.height() * 0.8))
 
+        # Toggle between raw edge mask view and bounding boxes view.
         self.edgesMode = False
 
-        # For one-shot calibration: use these counters.
+        # For smoothing bounding boxes between frames.
+        self.prevBoxes = []
+
+        # Auto-calibration parameters.
         self.autoAdjustFrames = 100  # number of frames to collect for calibration
         self.medianSum = 0.0
         self.medianCount = 0
-        self.autoThresholdCalibrated = False  # becomes True when calibration completes
-
-        # Flag to control auto calibration. When False, manual slider adjustments stick.
-        self.auto_calibration_enabled = True
+        self.autoThresholdCalibrated = False  # once calibrated, stop auto-adjusting
 
         # --- Central Widget and Video Display ---
         centralWidget = QWidget()
@@ -54,7 +54,6 @@ class CameraWidget(QMainWindow):
         controlLayout = QHBoxLayout(self.controlBarOverlay)
         controlLayout.setContentsMargins(10, 5, 10, 5)
         controlLayout.setSpacing(10)
-        # Original buttons remain unchanged.
         self.thresholdButton = QPushButton("Canny Thresholds")
         self.edgesViewButton = QPushButton("Edge Detection")
         for btn in (self.thresholdButton, self.edgesViewButton):
@@ -68,7 +67,7 @@ class CameraWidget(QMainWindow):
         self.sliderOverlay = QWidget(self.videoLabel)
         self.sliderOverlay.setStyleSheet("background-color: rgba(40, 40, 40, 230); border: none;")
         self.sliderOverlay.setVisible(False)
-        self.sliderOverlay.resize(300, 200)  # tall enough for two sliders and one button
+        self.sliderOverlay.resize(300, 200)  # taller to accommodate the new button
 
         sliderLayout = QVBoxLayout(self.sliderOverlay)
         sliderLayout.setContentsMargins(10, 10, 10, 10)
@@ -83,10 +82,6 @@ class CameraWidget(QMainWindow):
         self.upperSlider = QSlider(Qt.Horizontal)
         self.upperSlider.setRange(0, 500)
         self.upperSlider.setValue(150)
-
-        # Connect slider signals so that manual adjustments disable auto calibration.
-        self.lowerSlider.valueChanged.connect(self.disableAutoCalibration)
-        self.upperSlider.valueChanged.connect(self.disableAutoCalibration)
 
         # Vibrant slider style (red-to-green gradient)
         slider_style = """
@@ -113,10 +108,10 @@ class CameraWidget(QMainWindow):
         sliderLayout.addWidget(self.upperLabel)
         sliderLayout.addWidget(self.upperSlider)
 
-        # --- Auto Calibrate Button (in slider overlay) ---
+        # --- Auto Calibrate Button with feedback ---
         self.autoCalibrateButton = QPushButton("Auto Calibrate")
         self.autoCalibrateButton.setStyleSheet("font-size:10pt; color: white; background-color: #444; border: none; padding: 5px;")
-        self.autoCalibrateButton.clicked.connect(self.resetCalibration)
+        self.autoCalibrateButton.clicked.connect(self.manualCalibrate)
         sliderLayout.addWidget(self.autoCalibrateButton)
 
         # --- Connect Buttons ---
@@ -137,33 +132,8 @@ class CameraWidget(QMainWindow):
         # Install event filter for key presses ("h" to toggle overlays).
         self.installEventFilter(self)
 
-        # Set up CLAHE for adaptive histogram equalization.
-        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-
-    def disableAutoCalibration(self, value):
-        """If the user adjusts either slider, disable auto calibration."""
-        if self.auto_calibration_enabled:
-            self.auto_calibration_enabled = False
-            print("Auto calibration disabled due to manual slider adjustment.")
-
-    def resetCalibration(self):
-        """When the Auto Calibrate button is pressed:
-           - Clear previous calibration counters
-           - Enable auto calibration
-           - (The next 100 frames will update thresholds automatically)
-        """
-        self.medianSum = 0.0
-        self.medianCount = 0
-        self.autoThresholdCalibrated = False
-        self.auto_calibration_enabled = True
-        self.autoCalibrateButton.setText("Auto Calibrating")
-        print("Auto calibration initiated.")
-        # After 2 seconds, revert the button text.
-        QTimer.singleShot(2000, lambda: self.autoCalibrateButton.setText("Auto Calibrate"))
-
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
-            # Pressing 'h' toggles the control bar overlay.
             if event.key() == Qt.Key_H:
                 visible = not self.controlBarOverlay.isVisible()
                 self.controlBarOverlay.setVisible(visible)
@@ -185,26 +155,36 @@ class CameraWidget(QMainWindow):
     def toggleEdgesMode(self):
         self.edgesMode = not self.edgesMode
         if self.edgesMode:
-            self.edgesViewButton.setText("Bounding Boxes")
+            self.edgesViewButton.setText("Overlay View")
         else:
             self.edgesViewButton.setText("Edge Detection")
+
+    def manualCalibrate(self):
+        """Reset calibration counters and start auto-calibration.
+           Also provide visual feedback on the button."""
+        self.autoCalibrateButton.setText("Autocalibrating")
+        self.medianSum = 0.0
+        self.medianCount = 0
+        self.autoThresholdCalibrated = False
+        print("Manual calibration initiated.")
 
     def updateFrame(self):
         ret, frame = self.cap.read()
         if not ret:
             return
 
-        # Convert to grayscale.
+        # Convert frame to grayscale.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Apply CLAHE to normalize the image under varying lighting.
-        norm_gray = self.clahe.apply(gray)
+        # Enhance contrast using CLAHE.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray_equalized = clahe.apply(gray)
 
-        # Smooth the image.
-        blurred = cv2.GaussianBlur(norm_gray, (5, 5), 0)
+        # Apply Gaussian blur to reduce noise.
+        blurred = cv2.GaussianBlur(gray_equalized, (5, 5), 0)
 
-        # --- Auto Calibration (if enabled and not yet calibrated) ---
-        if self.auto_calibration_enabled and not self.autoThresholdCalibrated:
+        # --- Auto-adjust thresholds on startup or when manually triggered ---
+        if not self.autoThresholdCalibrated:
             median_val = np.median(blurred)
             self.medianSum += median_val
             self.medianCount += 1
@@ -216,34 +196,57 @@ class CameraWidget(QMainWindow):
                 self.lowerSlider.setValue(lower_auto)
                 self.upperSlider.setValue(upper_auto)
                 self.autoThresholdCalibrated = True
-                print(f"Auto calibrated thresholds: lower={lower_auto}, upper={upper_auto}")
-        # Get thresholds from sliders (manual adjustments override auto updates).
+                self.autoCalibrateButton.setText("Autocalibrated")
+                print(f"Auto-calibrated thresholds: lower={lower_auto}, upper={upper_auto}")
+                QTimer.singleShot(2000, lambda: self.autoCalibrateButton.setText("Auto Calibrate"))
+
+        # Get thresholds from sliders.
         lower_val = self.lowerSlider.value()
         upper_val = self.upperSlider.value()
 
-        # Apply Canny edge detection.
+        # --- Dual Edge Detection ---
         edges = cv2.Canny(blurred, lower_val, upper_val)
+        inverted = cv2.bitwise_not(blurred)
+        inverted_edges = cv2.Canny(inverted, lower_val, upper_val)
+        combined_edges = cv2.bitwise_or(edges, inverted_edges)
 
-        # Morphological closing to enhance edges.
+        # Apply morphological closing to connect broken edges.
         kernel = np.ones((7, 7), np.uint8)
-        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+        closed_edges = cv2.morphologyEx(combined_edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
+        # Dilate the mask slightly to join nearby edge segments.
+        dilate_kernel = np.ones((5, 5), np.uint8)
+        dilated_mask = cv2.dilate(closed_edges, dilate_kernel, iterations=1)
+
+        # Find contours in the dilated mask.
+        contours, _ = cv2.findContours(dilated_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        newBoxes = []
+        frame_area = frame.shape[0] * frame.shape[1]
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # Filter out noise (very small areas) and avoid large false detections (e.g. the whole background).
+            if area < 100 or area > frame_area * 0.9:
+                continue
+            x, y, w, h = cv2.boundingRect(cnt)
+            newBoxes.append((x, y, w, h))
+
+        # Smooth bounding boxes with previous detections to reduce jitter.
+        smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
+        self.prevBoxes = smoothedBoxes
+
+        # Draw bounding boxes on the frame.
+        for box in smoothedBoxes:
+            x, y, w, h = box
+            cv2.rectangle(frame, (int(x), int(y)), (int(x+w), int(y+h)), (0, 255, 0), thickness=2)
+
+        # Toggle view: raw closed edge mask (for debugging) or the bounding box overlay.
         if self.edgesMode:
-            # If in edge mode, display the edge image.
             disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR)
         else:
-            # Find contours and draw smooth outlines.
-            contours, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            # Filter out small contours.
-            filtered_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > 300]
-            for cnt in filtered_contours:
-                arc_len = cv2.arcLength(cnt, True)
-                epsilon = 0.02 * arc_len  # Adjust factor (2% of arc length) as needed
-                approx = cv2.approxPolyDP(cnt, epsilon, True)
-                cv2.polylines(frame, [approx], isClosed=True, color=(0, 255, 0), thickness=2)
             disp = frame
 
-        # Convert the processed frame to QImage and display.
+        # Convert processed frame to QImage and display.
         height, width, channel = disp.shape
         bytesPerLine = 3 * width
         qImg = QImage(disp.data, width, height, bytesPerLine, QImage.Format_BGR888)
@@ -256,6 +259,40 @@ class CameraWidget(QMainWindow):
             self.updateControlBarPosition()
         if self.sliderOverlay.isVisible():
             self.updateSliderOverlayPosition()
+
+    def smoothBoxes(self, newBoxes, prevBoxes, alpha=0.5, distance_threshold=20):
+        """
+        Smooth new bounding boxes by comparing with previous boxes.
+        For each new box, if a previous box's center is within the distance_threshold,
+        update its coordinates using exponential smoothing; otherwise, use the new box.
+        """
+        smoothed = []
+        used_prev = [False] * len(prevBoxes)
+        for nb in newBoxes:
+            x, y, w, h = nb
+            center_new = (x + w / 2, y + h / 2)
+            best_index = -1
+            best_distance = float('inf')
+            for i, pb in enumerate(prevBoxes):
+                px, py, pw, ph = pb
+                center_prev = (px + pw / 2, py + ph / 2)
+                dist = np.hypot(center_new[0] - center_prev[0], center_new[1] - center_prev[1])
+                if dist < best_distance and dist < distance_threshold and not used_prev[i]:
+                    best_distance = dist
+                    best_index = i
+            if best_index != -1:
+                pb = prevBoxes[best_index]
+                new_smoothed = (
+                    alpha * x + (1 - alpha) * pb[0],
+                    alpha * y + (1 - alpha) * pb[1],
+                    alpha * w + (1 - alpha) * pb[2],
+                    alpha * h + (1 - alpha) * pb[3]
+                )
+                smoothed.append(new_smoothed)
+                used_prev[best_index] = True
+            else:
+                smoothed.append(nb)
+        return smoothed
 
     def updateControlBarPosition(self):
         margin = 0  # span edge-to-edge
