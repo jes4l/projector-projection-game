@@ -23,9 +23,15 @@ class CameraWidget(QMainWindow):
         self.resize(int(screen.width() * 0.8), int(screen.height() * 0.8))
 
         self.edgesMode = False
+        self.prevBoxes = []  # for smoothing bounding boxes
+
+        # Auto-calibration parameters:
+        self.autoAdjustFrames = 100  # number of frames to collect for calibration
+        self.medianSum = 0.0
+        self.medianCount = 0
+        self.autoThresholdCalibrated = False  # once calibrated, stop auto-adjusting
 
         # --- Central Widget and Video Display ---
-        # The central widget holds only the video feed.
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
         layout = QVBoxLayout(centralWidget)
@@ -38,7 +44,6 @@ class CameraWidget(QMainWindow):
         layout.addWidget(self.videoLabel)
 
         # --- Control Bar Overlay (with buttons) ---
-        # This overlay spans the entire width of the video feed and now has a darker grey background.
         self.controlBarOverlay = QWidget(self.videoLabel)
         self.controlBarOverlay.setStyleSheet(
             "background-color: rgba(50, 50, 50, 230); border: none;")
@@ -51,20 +56,17 @@ class CameraWidget(QMainWindow):
         self.edgesViewButton = QPushButton("Edge Detection")
         for btn in (self.thresholdButton, self.edgesViewButton):
             btn.setFixedSize(110, 30)
-            # Force button text to white and use no border.
             btn.setStyleSheet("font-size:10pt; color: white; background-color: transparent; border: none;")
         controlLayout.addWidget(self.thresholdButton)
         controlLayout.addWidget(self.edgesViewButton)
         controlLayout.addStretch(1)
 
         # --- Threshold Slider Overlay ---
-        # This overlay (which appears when the threshold button is clicked)
-        # now uses a darker grey background.
         self.sliderOverlay = QWidget(self.videoLabel)
         self.sliderOverlay.setStyleSheet(
             "background-color: rgba(40, 40, 40, 230); border: none;")
         self.sliderOverlay.setVisible(False)
-        self.sliderOverlay.resize(300, 140)
+        self.sliderOverlay.resize(300, 180)  # slightly taller to accommodate the new button
 
         sliderLayout = QVBoxLayout(self.sliderOverlay)
         sliderLayout.setContentsMargins(10, 10, 10, 10)
@@ -80,12 +82,11 @@ class CameraWidget(QMainWindow):
         self.upperSlider.setRange(0, 500)
         self.upperSlider.setValue(150)
 
-        # Custom stylesheet for vibrant slider appearance:
+        # Vibrant slider style (red-to-green gradient)
         slider_style = """
             QSlider::groove:horizontal {
                 border: none;
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:0,
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #ff0000, stop:1 #00ff00);
                 height: 10px;
                 border-radius: 4px;
@@ -94,7 +95,7 @@ class CameraWidget(QMainWindow):
                 background: #eeeeee;
                 border: none;
                 width: 16px;
-                margin: -3px 0; 
+                margin: -3px 0;
                 border-radius: 8px;
             }
         """
@@ -105,6 +106,13 @@ class CameraWidget(QMainWindow):
         sliderLayout.addWidget(self.lowerSlider)
         sliderLayout.addWidget(self.upperLabel)
         sliderLayout.addWidget(self.upperSlider)
+
+        # --- Auto Calibrate Button ---
+        self.autoCalibrateButton = QPushButton("Auto Calibrate")
+        self.autoCalibrateButton.setStyleSheet(
+            "font-size:10pt; color: white; background-color: #444; border: none; padding: 5px;")
+        self.autoCalibrateButton.clicked.connect(self.manualCalibrate)
+        sliderLayout.addWidget(self.autoCalibrateButton)
 
         # --- Connect Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
@@ -119,19 +127,16 @@ class CameraWidget(QMainWindow):
         # --- Timer for Updating Frames ---
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateFrame)
-        self.timer.start(30)  # roughly 30 ms per frame (~30fps)
+        self.timer.start(30)  # roughly 30ms per frame (~30fps)
 
-        # Install event filter so we can catch key presses in the main window.
+        # Install event filter for key presses ("h" to toggle overlays).
         self.installEventFilter(self)
 
     def eventFilter(self, source, event):
-        """Catch key press events to toggle the control bar overlay."""
         if event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_H:
-                # Toggle the entire control bar overlay on key press "h"
                 visible = not self.controlBarOverlay.isVisible()
                 self.controlBarOverlay.setVisible(visible)
-                # Also hide the slider overlay if hiding the control bar.
                 if not visible:
                     self.sliderOverlay.setVisible(False)
                 if visible:
@@ -141,7 +146,6 @@ class CameraWidget(QMainWindow):
         return super().eventFilter(source, event)
 
     def toggleSliderOverlay(self):
-        """Show or hide the threshold slider overlay."""
         visible = not self.sliderOverlay.isVisible()
         self.sliderOverlay.setVisible(visible)
         if visible:
@@ -149,78 +153,133 @@ class CameraWidget(QMainWindow):
             self.updateSliderOverlayPosition()
 
     def toggleEdgesMode(self):
-        """Toggle between bounding boxes view and edges view."""
         self.edgesMode = not self.edgesMode
         if self.edgesMode:
             self.edgesViewButton.setText("Bounding Boxes")
         else:
             self.edgesViewButton.setText("Edge Detection")
 
+    def manualCalibrate(self):
+        """Reset calibration counters to force a new auto-calibration."""
+        self.medianSum = 0.0
+        self.medianCount = 0
+        self.autoThresholdCalibrated = False
+        print("Manual calibration initiated.")
+
     def updateFrame(self):
-        """Capture a frame, process it, and update the display."""
         ret, frame = self.cap.read()
         if not ret:
             return
 
-        # Preprocessing: grayscale and blur.
+        # Convert to grayscale and apply Gaussian blur.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # --- Auto-adjust thresholds on startup or when manually triggered ---
+        if not self.autoThresholdCalibrated:
+            median_val = np.median(blurred)
+            self.medianSum += median_val
+            self.medianCount += 1
+            if self.medianCount >= self.autoAdjustFrames:
+                avg_median = self.medianSum / self.medianCount
+                sigma = 0.33
+                lower_auto = int(max(0, (1.0 - sigma) * avg_median))
+                upper_auto = int(min(255, (1.0 + sigma) * avg_median))
+                self.lowerSlider.setValue(lower_auto)
+                self.upperSlider.setValue(upper_auto)
+                self.autoThresholdCalibrated = True
+                print(f"Auto-calibrated thresholds: lower={lower_auto}, upper={upper_auto}")
 
         # Get thresholds from sliders.
         lower_val = self.lowerSlider.value()
         upper_val = self.upperSlider.value()
 
-        # Canny edge detection.
+        # Apply Canny edge detection.
         edges = cv2.Canny(blurred, lower_val, upper_val)
-        kernel = np.ones((5, 5), np.uint8)
-        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+
+        # Increase robustness with a stronger morphological closing.
+        kernel = np.ones((7, 7), np.uint8)
+        closed_edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
 
         if self.edgesMode:
-            # In edges view, show the processed edges.
             disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR)
         else:
-            # In bounding boxes view, find contours and draw rectangles on the original frame.
+            # Find contours and smooth bounding boxes.
             contours, _ = cv2.findContours(closed_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            newBoxes = []
             for cnt in contours:
                 if cv2.contourArea(cnt) > 1000:  # filter small contours
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    newBoxes.append(cv2.boundingRect(cnt))
+            smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
+            self.prevBoxes = smoothedBoxes
+            for box in smoothedBoxes:
+                x, y, w, h = box
+                cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), 2)
             disp = frame
 
-        # Convert image from OpenCV (BGR) to QImage.
+        # Convert the processed frame to QImage and display.
         height, width, channel = disp.shape
         bytesPerLine = 3 * width
         qImg = QImage(disp.data, width, height, bytesPerLine, QImage.Format_BGR888)
         pixmap = QPixmap.fromImage(qImg)
-
-        # Scale the pixmap to fit the videoLabel while keeping the aspect ratio.
         self.videoLabel.setPixmap(pixmap.scaled(
             self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
-        # Update overlay positions if they are visible.
+        # Update overlay positions if visible.
         if self.controlBarOverlay.isVisible():
             self.updateControlBarPosition()
         if self.sliderOverlay.isVisible():
             self.updateSliderOverlayPosition()
 
+    def smoothBoxes(self, newBoxes, prevBoxes, alpha=0.5, distance_threshold=20):
+        """
+        Smooth new bounding boxes by comparing with previous boxes.
+
+        For each new box, if a previous box's center is within the distance_threshold,
+        update its coordinates using exponential smoothing; otherwise, use the new box.
+        """
+        smoothed = []
+        used_prev = [False] * len(prevBoxes)
+        for nb in newBoxes:
+            x, y, w, h = nb
+            center_new = (x + w / 2, y + h / 2)
+            best_index = -1
+            best_distance = float('inf')
+            for i, pb in enumerate(prevBoxes):
+                px, py, pw, ph = pb
+                center_prev = (px + pw / 2, py + ph / 2)
+                dist = np.hypot(center_new[0] - center_prev[0], center_new[1] - center_prev[1])
+                if dist < best_distance and dist < distance_threshold and not used_prev[i]:
+                    best_distance = dist
+                    best_index = i
+            if best_index != -1:
+                pb = prevBoxes[best_index]
+                new_smoothed = (
+                    alpha * x + (1 - alpha) * pb[0],
+                    alpha * y + (1 - alpha) * pb[1],
+                    alpha * w + (1 - alpha) * pb[2],
+                    alpha * h + (1 - alpha) * pb[3]
+                )
+                smoothed.append(new_smoothed)
+                used_prev[best_index] = True
+            else:
+                smoothed.append(nb)
+        return smoothed
+
     def updateControlBarPosition(self):
-        """Position the control bar overlay at the top of the video feed, spanning edge-to-edge."""
-        margin = 0  # no margin so it spans edge to edge
+        margin = 0  # span edge-to-edge
         width = self.videoLabel.width()
         height = 40  # fixed height for the control bar
         self.controlBarOverlay.setGeometry(margin, margin, width, height)
 
     def updateSliderOverlayPosition(self):
-        """Position the slider overlay below the threshold button (which is inside the control bar)."""
-        # Map the threshold button's bottom left to videoLabel coordinates.
         global_btn_pos = self.thresholdButton.mapToGlobal(self.thresholdButton.rect().bottomLeft())
         local_pos = self.videoLabel.mapFromGlobal(global_btn_pos)
         x = local_pos.x()
-        y = local_pos.y() + 5  # add a small margin
+        y = local_pos.y() + 5
         self.sliderOverlay.setGeometry(x, y, self.sliderOverlay.width(), self.sliderOverlay.height())
 
     def resizeEvent(self, event):
-        """Ensure that the video feed is rescaled and overlays are repositioned when the window is resized."""
         if self.videoLabel.pixmap():
             self.videoLabel.setPixmap(self.videoLabel.pixmap().scaled(
                 self.videoLabel.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -231,7 +290,6 @@ class CameraWidget(QMainWindow):
         super().resizeEvent(event)
 
     def closeEvent(self, event):
-        """Release the camera upon closing the window."""
         self.cap.release()
         event.accept()
 
@@ -241,3 +299,4 @@ if __name__ == "__main__":
     window = CameraWidget()
     window.show()
     sys.exit(app.exec_())
+
