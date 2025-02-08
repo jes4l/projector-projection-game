@@ -32,6 +32,10 @@ class CameraWidget(QMainWindow):
 
         # This will hold the last processed frame (with bounding boxes).
         self.lastFrame = None
+        # This will hold the most recent bounding boxes detected in the last frame.
+        self.lastBoundingBoxes = []
+        # This will store the bounding boxes for the captured background.
+        self.backgroundBoxes = []
         # Store the captured background frame.
         self.background = None
 
@@ -189,8 +193,10 @@ class CameraWidget(QMainWindow):
 
     def toggleCaptureBackground(self):
         """
-        Toggle between capturing the current frame as background and resuming live capture.
-        When not paused, the current processed frame is captured as background and displayed.
+        Toggle between capturing the current frame as background (with bounding boxes)
+        and resuming live capture.
+        When not paused, the current processed frame is captured as background,
+        and all detected bounding box coordinates are stored in self.backgroundBoxes.
         The button text briefly changes to "Captured" and then resets to "Capture Background" after 1 second.
         When paused, live capture resumes.
         """
@@ -201,6 +207,9 @@ class CameraWidget(QMainWindow):
             self.captureBackgroundButton.setText("Captured")
             if self.lastFrame is not None:
                 self.background = self.lastFrame.copy()
+                # Store the detected bounding boxes from the last frame.
+                self.backgroundBoxes = list(self.lastBoundingBoxes)
+                print("Captured bounding boxes:", self.backgroundBoxes)
                 height, width, channel = self.background.shape
                 bytesPerLine = 3 * width
                 qImg = QImage(self.background.data, width, height, bytesPerLine, QImage.Format_BGR888)
@@ -283,6 +292,8 @@ class CameraWidget(QMainWindow):
         # Smooth bounding boxes with previous detections to reduce jitter.
         smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
         self.prevBoxes = smoothedBoxes
+        # Store the most recent bounding boxes.
+        self.lastBoundingBoxes = smoothedBoxes
 
         # Draw bounding boxes on the frame.
         for box in smoothedBoxes:
