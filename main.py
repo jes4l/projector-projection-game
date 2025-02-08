@@ -169,17 +169,14 @@ class CameraWidget(QMainWindow):
             print("Player spawned!")
 
     def reset_gameplay(self):
-        """Load and scale the sprite and initialize its movement variables.
+        """Load the sprite and initialize its movement variables.
            If the sprite was hidden during calibration, its saved position is used."""
         sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
         self.sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
         if self.sprite is None:
             print(f"Error: Could not load sprite from {sprite_path}")
             return
-        scale_factor = 0.2
-        new_width = int(self.sprite.shape[1] * scale_factor)
-        new_height = int(self.sprite.shape[0] * scale_factor)
-        self.sprite = cv2.resize(self.sprite, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        # Use the original sprite size without scaling.
         self.sprite_height, self.sprite_width = self.sprite.shape[:2]
         # Set initial position; if we have a saved position, use it.
         if self.savedSpritePos is not None:
