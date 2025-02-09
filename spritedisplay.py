@@ -3,6 +3,16 @@ import numpy as np
 import keyboard  # For smooth continuous key detection
 
 # ---------------------------------------------------
+# Bounding box data for platforms (x, y, width, height)
+boxes = [
+    (358.0, 439.0, 106.0, 41.0),
+    (207.00039025543956, 392.0, 54.99960974456044, 88.0),
+    (150.3103411656808, 275.0000022865832, 44.69043875271128, 42.99999771341682),
+    (233.99999999998835, 215.5336958424663, 41.00000000001163, 41.466304157533735),
+    (313.0, 157.0, 77.49551637671563, 76.0)
+]
+
+# ---------------------------------------------------
 # Setup for smooth keyboard input via a key_state dict:
 # ---------------------------------------------------
 key_state = {"a": False, "d": False, "space": False}
@@ -25,10 +35,9 @@ if sprite is None:
     print(f"Error: Could not load sprite from {sprite_path}")
     exit(1)
 
-# Scale the sprite to 20% of its original size
-scale_factor = 0.2
-new_width = int(sprite.shape[1] * scale_factor)
-new_height = int(sprite.shape[0] * scale_factor)
+# Scale the sprite (adjust scale factor if needed)
+new_width = int(sprite.shape[1])
+new_height = int(sprite.shape[0])
 sprite = cv2.resize(sprite, (new_width, new_height), interpolation=cv2.INTER_AREA)
 sprite_height, sprite_width = sprite.shape[:2]
 
@@ -40,7 +49,6 @@ if not cap.isOpened():
     print("Error: Could not open the camera.")
     exit(1)
 
-# Set a lower resolution (adjust as needed)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
@@ -51,12 +59,14 @@ if not ret:
     exit(1)
 frame_height, frame_width = frame.shape[:2]
 
+# Define the ground level (when the sprite is on the bottom of the frame)
+ground_y = frame_height - sprite_height
+
 # ---------------------------------------------------
 # Initial sprite position:
 # ---------------------------------------------------
 x_offset = 10  # Start near the left edge.
-# Set the sprite so that its bottom aligns with the bottom of the frame.
-ground_y = frame_height - sprite_height
+# Start on the ground:
 y_offset = ground_y
 
 # ---------------------------------------------------
@@ -79,7 +89,7 @@ while True:
         print("Error: Failed to capture frame from the camera.")
         break
 
-    # Recalculate frame dimensions and ground level (dynamic in case the resolution changes)
+    # Update frame dimensions in case they change:
     frame_height, frame_width = frame.shape[:2]
     ground_y = frame_height - sprite_height
 
@@ -95,31 +105,83 @@ while True:
     x_offset = max(0, min(x_offset, frame_width - sprite_width))
 
     # ---------------------------------------------------
-    # Handle Jumping:
+    # Check if the sprite is still supported by a platform or the ground.
+    # (This lets the sprite “fall” if it walks off a platform.)
     # ---------------------------------------------------
-    # If not jumping, ensure the sprite stays on the ground.
     if not is_jumping:
-        y_offset = ground_y
+        supported = False
+        tolerance = 5  # pixels of tolerance when checking alignment
+        # Check for platform support:
+        for (plat_x, plat_y, plat_w, plat_h) in boxes:
+            # Check horizontal overlap
+            if x_offset + sprite_width > plat_x and x_offset < plat_x + plat_w:
+                # If the sprite's bottom is close enough to the platform's top
+                if abs((y_offset + sprite_height) - plat_y) < tolerance:
+                    supported = True
+                    break
+        # Also, if the sprite is at the ground level:
+        if abs((y_offset + sprite_height) - (ground_y + sprite_height)) < tolerance:
+            supported = True
 
-    # Start a jump if SPACE is pressed and we're not already in a jump.
+        # If no support is found, start falling:
+        if not supported:
+            is_jumping = True
+            # If you’re just starting to fall off a platform, begin with zero downward velocity.
+            jump_velocity = 0
+
+    # ---------------------------------------------------
+    # Handle Jumping (initiating a jump when supported):
+    # ---------------------------------------------------
     if key_state["space"] and not is_jumping:
         is_jumping = True
         jump_velocity = -15  # Negative value moves the sprite upward.
-        key_state["space"] = False  # Clear the space key to avoid retriggering.
+        key_state["space"] = False  # Clear the key to avoid retriggering.
 
-    # If in a jump, update vertical position using simple physics.
+    # ---------------------------------------------------
+    # Handle Vertical Movement (Jump/Fall Physics):
+    # ---------------------------------------------------
     if is_jumping:
+        prev_y_offset = y_offset
         y_offset += jump_velocity
-        jump_velocity += gravity  # Gravity reduces upward velocity, then increases downward speed.
-        # End the jump when the sprite reaches or passes the ground.
+        jump_velocity += gravity
+
+        # Only check for landing (collision) when falling downward
+        if jump_velocity > 0:
+            # Check collision with each platform
+            for (plat_x, plat_y, plat_w, plat_h) in boxes:
+                if x_offset + sprite_width > plat_x and x_offset < plat_x + plat_w:
+                    # Did the sprite cross the platform's top between the previous frame and now?
+                    if (prev_y_offset + sprite_width <= plat_y or prev_y_offset + sprite_height < plat_y) and \
+                       (y_offset + sprite_height >= plat_y):
+                        # Land on this platform:
+                        y_offset = int(plat_y - sprite_height)
+                        is_jumping = False
+                        jump_velocity = 0
+                        break
+
+        # Check collision with the ground:
         if y_offset >= ground_y:
             y_offset = ground_y
             is_jumping = False
             jump_velocity = 0
 
     # ---------------------------------------------------
+    # Draw the Platforms onto the Frame:
+    # ---------------------------------------------------
+    for (plat_x, plat_y, plat_w, plat_h) in boxes:
+        pt1 = (int(plat_x), int(plat_y))
+        pt2 = (int(plat_x + plat_w), int(plat_y + plat_h))
+        cv2.rectangle(frame, pt1, pt2, (0, 255, 0), 2)
+
+    # ---------------------------------------------------
     # Overlay the Sprite onto the Frame:
     # ---------------------------------------------------
+    # Check that the sprite doesn't go off-screen vertically.
+    if y_offset < 0:
+        y_offset = 0
+    if y_offset + sprite_height > frame_height:
+        y_offset = frame_height - sprite_height
+
     if sprite.shape[2] == 4:
         # If the sprite has an alpha channel, blend it.
         sprite_bgr = sprite[:, :, :3]
@@ -135,7 +197,7 @@ while True:
     # ---------------------------------------------------
     # Display the updated frame:
     # ---------------------------------------------------
-    cv2.imshow("Camera with Jumping Sprite", frame)
+    cv2.imshow("Camera with Jumping Sprite and Platforms", frame)
 
     # Exit if 'q' is pressed in the OpenCV window.
     if cv2.waitKey(1) & 0xFF == ord('q'):

@@ -183,7 +183,7 @@ class CameraWidget(QMainWindow):
             self.x_offset, self.y_offset = self.savedSpritePos
         else:
             self.x_offset = 10
-            self.y_offset = 0
+            self.y_offset = 0  # Will be adjusted on first frame
         self.is_jumping = False
         self.jump_velocity = 0
         self.gravity = 1
@@ -368,7 +368,8 @@ class CameraWidget(QMainWindow):
             else:
                 smoothedBoxes = self.capturedCoords
         else:
-            # In spawn mode, ignore bounding boxes.
+            # In spawn mode, ignore bounding boxes for drawing,
+            # but continue to use the capturedCoords for platform collision.
             smoothedBoxes = []
 
         # Draw bounding boxes (only if not spawned)
@@ -384,26 +385,62 @@ class CameraWidget(QMainWindow):
             # Calculate ground level based on current frame height.
             ground_y = frame.shape[0] - self.sprite_height
             self.ground_y = ground_y
+
             # Horizontal movement:
             if self.key_state.get("a", False):
                 self.x_offset -= self.move_step
             if self.key_state.get("d", False):
                 self.x_offset += self.move_step
             self.x_offset = max(0, min(self.x_offset, frame.shape[1] - self.sprite_width))
-            # Jumping:
-            if not self.is_jumping:
+
+            # On first spawn, if y_offset is 0, place the sprite on the ground.
+            if self.y_offset == 0:
                 self.y_offset = ground_y
+
+            # Check if the sprite is supported by a platform (from capturedCoords) or the ground.
+            if not self.is_jumping:
+                supported = False
+                tolerance = 5
+                for (plat_x, plat_y, plat_w, plat_h) in self.capturedCoords:
+                    if self.x_offset + self.sprite_width > plat_x and self.x_offset < plat_x + plat_w:
+                        if abs((self.y_offset + self.sprite_height) - plat_y) < tolerance:
+                            supported = True
+                            break
+                # Corrected ground check: compare sprite top (y_offset) to ground_y.
+                if abs(self.y_offset - ground_y) < tolerance:
+                    supported = True
+                if not supported:
+                    self.is_jumping = True
+                    self.jump_velocity = 0
+
+            # Initiate jump if space is pressed and the sprite is supported.
             if self.key_state.get("space", False) and not self.is_jumping:
                 self.is_jumping = True
                 self.jump_velocity = -15
                 self.key_state["space"] = False  # consume the key
+
+            # Jump physics:
             if self.is_jumping:
+                prev_y_offset = self.y_offset
                 self.y_offset += self.jump_velocity
                 self.jump_velocity += self.gravity
-                if self.y_offset >= ground_y:
-                    self.y_offset = ground_y
-                    self.is_jumping = False
-                    self.jump_velocity = 0
+                # If falling down, check for landing on any platform.
+                if self.jump_velocity > 0:
+                    landed = False
+                    for (plat_x, plat_y, plat_w, plat_h) in self.capturedCoords:
+                        if self.x_offset + self.sprite_width > plat_x and self.x_offset < plat_x + plat_w:
+                            if (prev_y_offset + self.sprite_height <= plat_y) and (self.y_offset + self.sprite_height >= plat_y):
+                                self.y_offset = int(plat_y - self.sprite_height)
+                                self.is_jumping = False
+                                self.jump_velocity = 0
+                                landed = True
+                                break
+                    # Corrected ground landing check: compare sprite top (y_offset) to ground_y.
+                    if not landed and self.y_offset >= ground_y:
+                        self.y_offset = ground_y
+                        self.is_jumping = False
+                        self.jump_velocity = 0
+
             # Overlay the sprite onto the frame.
             if self.sprite is not None:
                 if self.sprite.shape[2] == 4:
