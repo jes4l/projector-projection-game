@@ -180,6 +180,29 @@ class CameraWidget(QMainWindow):
 
         self.installEventFilter(self)
 
+        # NEW: Enemy Sprites Setup and Lives
+        enemy_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0004.png"
+        self.enemySprite = cv2.imread(enemy_sprite_path, cv2.IMREAD_UNCHANGED)
+        if self.enemySprite is None:
+            print(f"Error: Could not load enemy sprite from {enemy_sprite_path}")
+        else:
+            self.enemySprite_height, self.enemySprite_width = self.enemySprite.shape[:2]
+        self.enemies = []  # List of enemy dictionaries
+        self.enemy_speed = 2  # Speed of enemy movement in pixels per frame
+        frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        for i in range(3):
+            enemy = {}
+            enemy['x'] = random.randint(0, max(0, frame_width - (self.enemySprite_width if self.enemySprite is not None else 50)))
+            enemy['y'] = frame_height - (self.enemySprite_height if self.enemySprite is not None else 50)
+            enemy['direction'] = random.choice([-1, 1])
+            enemy['speed'] = self.enemy_speed
+            self.enemies.append(enemy)
+        self.lives = 3  # Player lives
+        # NEW: Variables to prevent rapid collisions and tint the sprite.
+        self.invulnerable = False
+        self.red_tint = False
+
     # --------------------------
     # Sprite & Gameplay Methods
     # --------------------------
@@ -383,6 +406,14 @@ class CameraWidget(QMainWindow):
             self.respawnSprite(self.savedSpritePos)
         self.reset_bbox_accumulation()
 
+    # NEW: Helper method to reset invulnerability after a hit.
+    def reset_invulnerability(self):
+        self.invulnerable = False
+
+    # NEW: Helper method to reset the red tint.
+    def reset_red_tint(self):
+        self.red_tint = False
+
     # --------------------------
     # Frame Processing
     # --------------------------
@@ -513,15 +544,24 @@ class CameraWidget(QMainWindow):
                         self.jump_velocity = 0
 
             if self.sprite is not None:
+                # NEW: If red tint is active, draw the sprite tinted red.
                 if self.sprite.shape[2] == 4:
                     sprite_bgr = self.sprite[:, :, :3]
+                    if self.red_tint:
+                        # Create a red image of the same shape.
+                        tinted_sprite = np.zeros_like(sprite_bgr)
+                        tinted_sprite[:, :] = (0, 0, 255)  # Red in BGR (blue=0, green=0, red=255)
+                        sprite_bgr = tinted_sprite
                     alpha_channel = self.sprite[:, :, 3] / 255.0
                     alpha = np.dstack([alpha_channel] * 3)
                     roi = frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width]
                     blended = (alpha * sprite_bgr.astype(float) + (1 - alpha) * roi.astype(float)).astype(np.uint8)
                     frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = blended
                 else:
-                    frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = self.sprite
+                    if self.red_tint:
+                        frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = np.full((self.sprite_height, self.sprite_width, 3), (0, 0, 255), dtype=np.uint8)
+                    else:
+                        frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = self.sprite
 
             if self.targetSprite is not None:
                 tx, ty = self.targetX, self.targetY
@@ -551,7 +591,8 @@ class CameraWidget(QMainWindow):
             margin = 5
             start_x = 10
             start_y = 10
-            for i in range(3):
+            # NEW: Draw only the remaining hearts (self.lives)
+            for i in range(self.lives):
                 x = start_x + i * (heart_w + margin)
                 y = start_y
                 if self.heartSprite.shape[2] == 4:
@@ -571,6 +612,60 @@ class CameraWidget(QMainWindow):
         else:
             cv2.putText(disp, f"Score: {self.score}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        # NEW: Update and draw enemy sprites, and check collisions with the player.
+        # Only do this if calibration is complete.
+        if self.autoThresholdCalibrated and self.spawned:
+            frame_width = disp.shape[1]
+            for enemy in self.enemies:
+                # Move enemy horizontally.
+                enemy['x'] += enemy['direction'] * enemy['speed']
+                # Bounce off the left/right boundaries.
+                if enemy['x'] <= 0:
+                    enemy['x'] = 0
+                    enemy['direction'] = 1
+                elif enemy['x'] + (self.enemySprite_width if self.enemySprite is not None else 50) >= frame_width:
+                    enemy['x'] = frame_width - (self.enemySprite_width if self.enemySprite is not None else 50)
+                    enemy['direction'] = -1
+
+                ex, ey = int(enemy['x']), int(enemy['y'])
+                if self.enemySprite is not None:
+                    if self.enemySprite.shape[2] == 4:
+                        enemy_bgr = self.enemySprite[:, :, :3]
+                        alpha_channel = self.enemySprite[:, :, 3] / 255.0
+                        alpha_enemy = np.dstack([alpha_channel] * 3)
+                        if ey + self.enemySprite_height <= disp.shape[0] and ex + self.enemySprite_width <= disp.shape[1]:
+                            roi_enemy = disp[ey:ey+self.enemySprite_height, ex:ex+self.enemySprite_width]
+                            blended_enemy = (alpha_enemy * enemy_bgr.astype(float) + (1 - alpha_enemy) * roi_enemy.astype(float)).astype(np.uint8)
+                            disp[ey:ey+self.enemySprite_height, ex:ex+self.enemySprite_width] = blended_enemy
+                    else:
+                        if ey + self.enemySprite_height <= disp.shape[0] and ex + self.enemySprite_width <= disp.shape[1]:
+                            disp[ey:ey+self.enemySprite_height, ex:ex+self.enemySprite_width] = self.enemySprite
+
+                # Check for collision with the player only if not invulnerable.
+                if not self.invulnerable and self.sprite is not None:
+                    player_x, player_y = self.x_offset, self.y_offset
+                    player_w, player_h = self.sprite_width, self.sprite_height
+                    enemy_x, enemy_y = enemy['x'], enemy['y']
+                    enemy_w = self.enemySprite_width if self.enemySprite is not None else 50
+                    enemy_h = self.enemySprite_height if self.enemySprite is not None else 50
+                    if not (player_x + player_w <= enemy_x or player_x >= enemy_x + enemy_w or
+                            player_y + player_h <= enemy_y or player_y >= enemy_y + enemy_h):
+                        self.lives -= 1
+                        print("Player hit by enemy! Lives remaining:", self.lives)
+                        self.invulnerable = True
+                        self.red_tint = True
+                        QTimer.singleShot(1000, self.reset_invulnerability)
+                        QTimer.singleShot(1000, self.reset_red_tint)
+                        # Optionally reposition the enemy to avoid repeated collisions.
+                        enemy['x'] = random.randint(0, frame_width - enemy_w)
+                        enemy['direction'] = random.choice([-1, 1])
+                        if self.lives <= 0:
+                            print("No lives left! Game Over.")
+                            self.cap.release()
+                            import subprocess
+                            subprocess.Popen(["python", "start.py"])
+                            QApplication.quit()
 
         self.lastFrame = disp
         height, width, channel = disp.shape
@@ -729,6 +824,19 @@ class SerialReaderThread(QThread):
         self.wait()
 
 # ------------------------------------------------------------------------------
+# NEW: Event filter to trigger auto calibration on 'c' key press.
+# ------------------------------------------------------------------------------
+from PyQt5.QtCore import QObject
+
+class AutoCalibrateKeyFilter(QObject):
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_C:
+                obj.manualCalibrate()
+                return True
+        return super().eventFilter(obj, event)
+
+# ------------------------------------------------------------------------------
 # Main Application Entry Point
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -739,6 +847,10 @@ if __name__ == "__main__":
     serial_thread = SerialReaderThread("COM6", 115200)
     serial_thread.key_signal.connect(window.updateKeyState)
     serial_thread.start()
+
+    # NEW: Install auto calibration key filter for 'c' key press.
+    autoCalibFilter = AutoCalibrateKeyFilter()
+    window.installEventFilter(autoCalibFilter)
 
     window.showMaximized()
     exit_code = app.exec_()
