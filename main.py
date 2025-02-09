@@ -2,7 +2,9 @@ import sys
 import cv2
 import numpy as np
 import random
-from PyQt5.QtCore import Qt, QTimer, QEvent
+import serial
+import threading  # For scheduling delayed key releases
+from PyQt5.QtCore import Qt, QTimer, QEvent, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QPushButton,
@@ -51,7 +53,7 @@ class CameraWidget(QMainWindow):
         self.jump_velocity = 0   # Current jump vertical velocity.
         self.gravity = 1         # Gravity per frame.
         # Dictionary to hold current key states.
-        self.key_state = {"a": False, "d": False, "space": False}
+        self.key_state = {"a": False, "d": False, " ": False}
         # When calibration is triggered while the sprite is visible, its position is saved.
         self.savedSpritePos = None
 
@@ -168,7 +170,7 @@ class CameraWidget(QMainWindow):
         # --------------------------
         # OpenCV Camera Capture
         # --------------------------
-        self.cap = cv2.VideoCapture(1)
+        self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             print("Could not open camera")
             sys.exit()
@@ -217,7 +219,7 @@ class CameraWidget(QMainWindow):
         self.jump_velocity = 0
         self.gravity = 1
         self.move_step = 5
-        self.key_state = {"a": False, "d": False, "space": False}
+        self.key_state = {"a": False, "d": False, " ": False}
 
     def hideSprite(self):
         """If the sprite is visible, save its current position and hide it immediately."""
@@ -338,7 +340,7 @@ class CameraWidget(QMainWindow):
             elif event.key() == Qt.Key_D:
                 self.key_state["d"] = True
             elif event.key() == Qt.Key_Space:
-                self.key_state["space"] = True
+                self.key_state[" "] = True
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event):
@@ -348,7 +350,7 @@ class CameraWidget(QMainWindow):
             elif event.key() == Qt.Key_D:
                 self.key_state["d"] = False
             elif event.key() == Qt.Key_Space:
-                self.key_state["space"] = False
+                self.key_state[" "] = False
         super().keyReleaseEvent(event)
 
     def toggleSliderOverlay(self):
@@ -482,11 +484,10 @@ class CameraWidget(QMainWindow):
                     self.is_jumping = True
                     self.jump_velocity = 0
 
-            # Buffed jump: set the jump velocity to -14 instead of -15.
-            if self.key_state.get("space", False) and not self.is_jumping:
+            if self.key_state.get(" ", False) and not self.is_jumping:
                 self.is_jumping = True
-                self.jump_velocity = -14
-                self.key_state["space"] = False
+                self.jump_velocity = -15
+                self.key_state[" "] = False
 
             if self.is_jumping:
                 prev_y_offset = self.y_offset
@@ -666,8 +667,82 @@ class CameraWidget(QMainWindow):
         self.cap.release()
         event.accept()
 
+    # ------------------------------------------------------------------------
+    # NEW: Helper Method to update key state from the serial input
+    # ------------------------------------------------------------------------
+    def updateKeyState(self, key, state):
+        if key in self.key_state:
+            self.key_state[key] = state
+            print(f"Key state for '{key}' updated to {state}")
+
+# ------------------------------------------------------------------------------
+# NEW: SerialReaderThread to integrate the microcontroller client code.
+# This thread reads from the serial port and emits a signal with the key and its state.
+# For keys 'a' and 'd', a key press is emitted immediately and then a key release is scheduled after one second.
+# For the space key, ' ' means press; '_' means release.
+# ------------------------------------------------------------------------------
+
+class SerialReaderThread(QThread):
+    key_signal = pyqtSignal(str, bool)
+
+    def __init__(self, port="COM6", baudrate=115200, parent=None):
+        super().__init__(parent)
+        self.port = port
+        self.baudrate = baudrate
+        self._running = True
+        try:
+            self.ser = serial.Serial(self.port, self.baudrate, timeout=1)
+            print(f"Serial port {self.port} opened at {self.baudrate} baud.")
+        except Exception as e:
+            print(f"Error opening serial port: {e}")
+            self.ser = None
+
+    def run(self):
+        if not self.ser:
+            return
+        while self._running:
+            data = self.ser.read(1)  # Read one byte
+            if not data:
+                continue
+            try:
+                char = data.decode('utf-8', errors='ignore')
+            except Exception as e:
+                print("Decoding error:", e)
+                continue
+
+            # For 'a' and 'd', emit press immediately and schedule a release after 1 second.
+            if char == 'a':
+                self.key_signal.emit('a', True)
+                threading.Timer(0.3, lambda: self.key_signal.emit('a', False)).start()
+            elif char == 'd':
+                self.key_signal.emit('d', True)
+                threading.Timer(0.3, lambda: self.key_signal.emit('d', False)).start()
+            elif char == ' ':
+                self.key_signal.emit(' ', True)
+            elif char == '_':  # Assume '_' is sent for releasing the space key.
+                self.key_signal.emit(' ', False)
+        if self.ser:
+            self.ser.close()
+
+    def stop(self):
+        self._running = False
+        self.wait()
+
+# ------------------------------------------------------------------------------
+# Main Application Entry Point
+# ------------------------------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CameraWidget()
+
+    # Create and start the serial reader thread.
+    serial_thread = SerialReaderThread("COM6", 115200)
+    serial_thread.key_signal.connect(window.updateKeyState)
+    serial_thread.start()
+
     window.showMaximized()
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+
+    # On exit, stop the serial thread.
+    serial_thread.stop()
+    sys.exit(exit_code)
