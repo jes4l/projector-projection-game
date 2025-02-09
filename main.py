@@ -188,11 +188,12 @@ class CameraWidget(QMainWindow):
         else:
             self.enemySprite_height, self.enemySprite_width = self.enemySprite.shape[:2]
         self.enemies = []  # List of enemy dictionaries
-        self.enemy_speed = 2  # Speed of enemy movement in pixels per frame
+        self.enemy_speed = 1.4  # Speed of enemy movement in pixels per frame
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        for i in range(3):
+        for i in range(2):
             enemy = {}
+            # Initially choose a random x along the bottom.
             enemy['x'] = random.randint(0, max(0, frame_width - (self.enemySprite_width if self.enemySprite is not None else 50)))
             enemy['y'] = frame_height - (self.enemySprite_height if self.enemySprite is not None else 50)
             enemy['direction'] = random.choice([-1, 1])
@@ -550,7 +551,7 @@ class CameraWidget(QMainWindow):
                     if self.red_tint:
                         # Create a red image of the same shape.
                         tinted_sprite = np.zeros_like(sprite_bgr)
-                        tinted_sprite[:, :] = (0, 0, 255)  # Red in BGR (blue=0, green=0, red=255)
+                        tinted_sprite[:, :] = (0, 0, 255)  # Red in BGR
                         sprite_bgr = tinted_sprite
                     alpha_channel = self.sprite[:, :, 3] / 255.0
                     alpha = np.dstack([alpha_channel] * 3)
@@ -613,19 +614,56 @@ class CameraWidget(QMainWindow):
             cv2.putText(disp, f"Score: {self.score}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # NEW: Update and draw enemy sprites, and check collisions with the player.
-        # Only do this if calibration is complete.
+        # NEW: Update and draw enemy sprites, check collisions with the player,
+        # and prevent enemy sprites from spawning in the bounding box areas.
         if self.autoThresholdCalibrated and self.spawned:
             frame_width = disp.shape[1]
             for enemy in self.enemies:
-                # Move enemy horizontally.
-                enemy['x'] += enemy['direction'] * enemy['speed']
+                enemy_width = self.enemySprite_width if self.enemySprite is not None else 50
+                enemy_height = self.enemySprite_height if self.enemySprite is not None else 50
+                # NEW: Check if enemy is currently in any bounding box area.
+                in_platform = False
+                for platform in self.capturedCoords:
+                    if self.rectangles_intersect(enemy['x'], enemy['y'], enemy_width, enemy_height,
+                                                 platform[0], platform[1], platform[2], platform[3]):
+                        in_platform = True
+                        break
+                if in_platform:
+                    valid_spawn = False
+                    attempts = 0
+                    while not valid_spawn and attempts < 10:
+                        candidate_x = random.randint(0, frame_width - enemy_width)
+                        candidate_y = enemy['y']  # Keep enemy at its y (bottom)
+                        valid_spawn = True
+                        for platform in self.capturedCoords:
+                            if self.rectangles_intersect(candidate_x, candidate_y, enemy_width, enemy_height,
+                                                         platform[0], platform[1], platform[2], platform[3]):
+                                valid_spawn = False
+                                break
+                        if valid_spawn:
+                            enemy['x'] = candidate_x
+                        attempts += 1
+
+                # NEW: Compute predicted x position based on current direction.
+                predicted_x = enemy['x'] + enemy['direction'] * enemy['speed']
+                # NEW: Check if moving to predicted_x would collide with any platform.
+                collision = False
+                for platform in self.capturedCoords:
+                    if self.rectangles_intersect(predicted_x, enemy['y'], enemy_width, enemy_height,
+                                                 platform[0], platform[1], platform[2], platform[3]):
+                        collision = True
+                        break
+                if collision:
+                    enemy['direction'] = -enemy['direction']
+                    predicted_x = enemy['x'] + enemy['direction'] * enemy['speed']
+                enemy['x'] = predicted_x
+
                 # Bounce off the left/right boundaries.
                 if enemy['x'] <= 0:
                     enemy['x'] = 0
                     enemy['direction'] = 1
-                elif enemy['x'] + (self.enemySprite_width if self.enemySprite is not None else 50) >= frame_width:
-                    enemy['x'] = frame_width - (self.enemySprite_width if self.enemySprite is not None else 50)
+                elif enemy['x'] + enemy_width >= frame_width:
+                    enemy['x'] = frame_width - enemy_width
                     enemy['direction'] = -1
 
                 ex, ey = int(enemy['x']), int(enemy['y'])
@@ -634,23 +672,20 @@ class CameraWidget(QMainWindow):
                         enemy_bgr = self.enemySprite[:, :, :3]
                         alpha_channel = self.enemySprite[:, :, 3] / 255.0
                         alpha_enemy = np.dstack([alpha_channel] * 3)
-                        if ey + self.enemySprite_height <= disp.shape[0] and ex + self.enemySprite_width <= disp.shape[1]:
-                            roi_enemy = disp[ey:ey+self.enemySprite_height, ex:ex+self.enemySprite_width]
+                        if ey + enemy_height <= disp.shape[0] and ex + enemy_width <= disp.shape[1]:
+                            roi_enemy = disp[ey:ey+enemy_height, ex:ex+enemy_width]
                             blended_enemy = (alpha_enemy * enemy_bgr.astype(float) + (1 - alpha_enemy) * roi_enemy.astype(float)).astype(np.uint8)
-                            disp[ey:ey+self.enemySprite_height, ex:ex+self.enemySprite_width] = blended_enemy
+                            disp[ey:ey+enemy_height, ex:ex+enemy_width] = blended_enemy
                     else:
-                        if ey + self.enemySprite_height <= disp.shape[0] and ex + self.enemySprite_width <= disp.shape[1]:
-                            disp[ey:ey+self.enemySprite_height, ex:ex+self.enemySprite_width] = self.enemySprite
+                        if ey + enemy_height <= disp.shape[0] and ex + enemy_width <= disp.shape[1]:
+                            disp[ey:ey+enemy_height, ex:ex+enemy_width] = self.enemySprite
 
                 # Check for collision with the player only if not invulnerable.
                 if not self.invulnerable and self.sprite is not None:
                     player_x, player_y = self.x_offset, self.y_offset
                     player_w, player_h = self.sprite_width, self.sprite_height
-                    enemy_x, enemy_y = enemy['x'], enemy['y']
-                    enemy_w = self.enemySprite_width if self.enemySprite is not None else 50
-                    enemy_h = self.enemySprite_height if self.enemySprite is not None else 50
-                    if not (player_x + player_w <= enemy_x or player_x >= enemy_x + enemy_w or
-                            player_y + player_h <= enemy_y or player_y >= enemy_y + enemy_h):
+                    if not (player_x + player_w <= enemy['x'] or player_x >= enemy['x'] + enemy_width or
+                            player_y + player_h <= enemy['y'] or player_y >= enemy['y'] + enemy_height):
                         self.lives -= 1
                         print("Player hit by enemy! Lives remaining:", self.lives)
                         self.invulnerable = True
@@ -658,7 +693,7 @@ class CameraWidget(QMainWindow):
                         QTimer.singleShot(1000, self.reset_invulnerability)
                         QTimer.singleShot(1000, self.reset_red_tint)
                         # Optionally reposition the enemy to avoid repeated collisions.
-                        enemy['x'] = random.randint(0, frame_width - enemy_w)
+                        enemy['x'] = random.randint(0, frame_width - enemy_width)
                         enemy['direction'] = random.choice([-1, 1])
                         if self.lives <= 0:
                             print("No lives left! Game Over.")
@@ -776,7 +811,6 @@ class CameraWidget(QMainWindow):
 # For keys 'a' and 'd', a key press is emitted immediately and then a key release is scheduled after one second.
 # For the space key, ' ' means press; '_' means release.
 # ------------------------------------------------------------------------------
-
 class SerialReaderThread(QThread):
     key_signal = pyqtSignal(str, bool)
 
