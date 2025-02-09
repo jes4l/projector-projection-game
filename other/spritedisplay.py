@@ -29,7 +29,7 @@ keyboard.hook(on_key_event)
 # ---------------------------------------------------
 # Load and scale the sprite:
 # ---------------------------------------------------
-sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
+sprite_path = r"/Sprite-0001.png"
 sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
 if sprite is None:
     print(f"Error: Could not load sprite from {sprite_path}")

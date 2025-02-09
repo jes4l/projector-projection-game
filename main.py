@@ -1,6 +1,7 @@
 import sys
 import cv2
 import numpy as np
+import random
 from PyQt5.QtCore import Qt, QTimer, QEvent
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
@@ -53,6 +54,16 @@ class CameraWidget(QMainWindow):
         self.key_state = {"a": False, "d": False, "space": False}
         # When calibration is triggered while the sprite is visible, its position is saved.
         self.savedSpritePos = None
+
+        # --------------------------
+        # Target Sprite & Scoring
+        # --------------------------
+        self.score = 0
+        self.targetSprite = None  # The target sprite image.
+        self.targetX = 0          # Target sprite horizontal position.
+        self.targetY = 0          # Target sprite vertical position.
+        self.target_sprite_width = 0
+        self.target_sprite_height = 0
 
         # --------------------------
         # UI Setup
@@ -165,7 +176,16 @@ class CameraWidget(QMainWindow):
         """Called when Spawn is clicked. Initializes gameplay if not already spawned."""
         if not self.spawned:
             self.spawned = True
+            self.score = 0  # reset score on new spawn
             self.reset_gameplay()
+            # Load the target sprite for scoring.
+            target_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0002.png"
+            self.targetSprite = cv2.imread(target_sprite_path, cv2.IMREAD_UNCHANGED)
+            if self.targetSprite is None:
+                print(f"Error: Could not load target sprite from {target_sprite_path}")
+            else:
+                self.target_sprite_height, self.target_sprite_width = self.targetSprite.shape[:2]
+                self.generateTarget()
             print("Player spawned!")
 
     def reset_gameplay(self):
@@ -206,6 +226,40 @@ class CameraWidget(QMainWindow):
         # Override the position with the saved position.
         self.x_offset, self.y_offset = pos
         print("Sprite respawned at", pos)
+
+    def generateTarget(self):
+        """
+        Randomly generate a new target sprite position within the upper quarter of the camera frame,
+        ensuring that the target does not spawn inside any averaged bounding box.
+        """
+        frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        max_attempts = 10
+        valid = False
+        attempt = 0
+        new_x = 0
+        new_y = 0
+        while attempt < max_attempts and not valid:
+            new_x = random.randint(0, max(0, frame_width - self.target_sprite_width))
+            # Spawn coin in the upper quarter of the room.
+            max_y = max(0, (frame_height // 4) - self.target_sprite_height)
+            new_y = random.randint(0, max_y)
+            valid = True
+            # If there are any bounding boxes, ensure the target does not intersect them.
+            for (bx, by, bw, bh) in self.capturedCoords:
+                if self.rectangles_intersect(new_x, new_y, self.target_sprite_width, self.target_sprite_height,
+                                             bx, by, bw, bh):
+                    valid = False
+                    break
+            attempt += 1
+        self.targetX = new_x
+        self.targetY = new_y
+        # Uncomment for debugging:
+        # print("New target generated at:", self.targetX, self.targetY)
+
+    def rectangles_intersect(self, x1, y1, w1, h1, x2, y2, w2, h2):
+        """Return True if the two rectangles intersect."""
+        return not (x1 + w1 <= x2 or x1 >= x2 + w2 or y1 + h1 <= y2 or y1 >= y2 + h2)
 
     # --------------------------
     # UI Event Handlers
@@ -393,8 +447,8 @@ class CameraWidget(QMainWindow):
                 self.x_offset += self.move_step
             self.x_offset = max(0, min(self.x_offset, frame.shape[1] - self.sprite_width))
 
-            # On first spawn, if y_offset is 0, place the sprite on the ground.
-            if self.y_offset == 0:
+            # On first spawn, if y_offset is 0 and not jumping, place the sprite on the ground.
+            if self.y_offset == 0 and not self.is_jumping:
                 self.y_offset = ground_y
 
             # Check if the sprite is supported by a platform (from capturedCoords) or the ground.
@@ -440,8 +494,13 @@ class CameraWidget(QMainWindow):
                         self.y_offset = ground_y
                         self.is_jumping = False
                         self.jump_velocity = 0
+                # If the sprite goes above the top of the screen, clamp it at 0 and cancel upward velocity.
+                if self.y_offset < 0:
+                    self.y_offset = 0
+                    if self.jump_velocity < 0:
+                        self.jump_velocity = 0
 
-            # Overlay the sprite onto the frame.
+            # Overlay the player sprite onto the frame.
             if self.sprite is not None:
                 if self.sprite.shape[2] == 4:
                     sprite_bgr = self.sprite[:, :, :3]
@@ -453,10 +512,38 @@ class CameraWidget(QMainWindow):
                 else:
                     frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = self.sprite
 
+            # --- Draw the target sprite and check collision ---
+            if self.targetSprite is not None:
+                tx, ty = self.targetX, self.targetY
+                if self.targetSprite.shape[2] == 4:
+                    sprite2_bgr = self.targetSprite[:, :, :3]
+                    alpha_channel = self.targetSprite[:, :, 3] / 255.0
+                    alpha2 = np.dstack([alpha_channel] * 3)
+                    roi2 = frame[ty:ty+self.target_sprite_height, tx:tx+self.target_sprite_width]
+                    blended2 = (alpha2 * sprite2_bgr.astype(float) + (1 - alpha2) * roi2.astype(float)).astype(np.uint8)
+                    frame[ty:ty+self.target_sprite_height, tx:tx+self.target_sprite_width] = blended2
+                else:
+                    frame[ty:ty+self.target_sprite_height, tx:tx+self.target_sprite_width] = self.targetSprite
+
+                # Collision detection between the player and target sprites.
+                if (self.x_offset < self.targetX + self.target_sprite_width and
+                    self.x_offset + self.sprite_width > self.targetX and
+                    self.y_offset < self.targetY + self.target_sprite_height and
+                    self.y_offset + self.sprite_height > self.targetY):
+                    self.score += 1
+                    print("Score increased to", self.score)
+                    self.generateTarget()
+
         # --------------------
         # Display the Frame
         # --------------------
+        # Use the processed frame or edge mask depending on edgesMode.
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
+
+        # Draw the score text on the display frame.
+        cv2.putText(disp, f"Score: {self.score}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
         self.lastFrame = disp
         height, width, channel = disp.shape
         bytesPerLine = 3 * width
