@@ -66,6 +66,15 @@ class CameraWidget(QMainWindow):
         self.target_sprite_height = 0
 
         # --------------------------
+        # Heart Sprite (Lives Display)
+        # --------------------------
+        # Load the heart sprite immediately so that it is displayed from the very beginning.
+        heart_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0003.png"
+        self.heartSprite = cv2.imread(heart_sprite_path, cv2.IMREAD_UNCHANGED)
+        if self.heartSprite is None:
+            print(f"Error: Could not load heart sprite from {heart_sprite_path}")
+
+        # --------------------------
         # UI Setup
         # --------------------------
         centralWidget = QWidget()
@@ -426,7 +435,7 @@ class CameraWidget(QMainWindow):
             # but continue to use the capturedCoords for platform collision.
             smoothedBoxes = []
 
-        # Draw bounding boxes (only if not spawned)
+        # Draw bounding boxes (only if sprite is not spawned)
         if not self.spawned:
             for box in smoothedBoxes:
                 x, y, w, h = box
@@ -460,7 +469,6 @@ class CameraWidget(QMainWindow):
                         if abs((self.y_offset + self.sprite_height) - plat_y) < tolerance:
                             supported = True
                             break
-                # Corrected ground check: compare sprite top (y_offset) to ground_y.
                 if abs(self.y_offset - ground_y) < tolerance:
                     supported = True
                 if not supported:
@@ -489,7 +497,6 @@ class CameraWidget(QMainWindow):
                                 self.jump_velocity = 0
                                 landed = True
                                 break
-                    # Corrected ground landing check: compare sprite top (y_offset) to ground_y.
                     if not landed and self.y_offset >= ground_y:
                         self.y_offset = ground_y
                         self.is_jumping = False
@@ -525,7 +532,6 @@ class CameraWidget(QMainWindow):
                 else:
                     frame[ty:ty+self.target_sprite_height, tx:tx+self.target_sprite_width] = self.targetSprite
 
-                # Collision detection between the player and target sprites.
                 if (self.x_offset < self.targetX + self.target_sprite_width and
                     self.x_offset + self.sprite_width > self.targetX and
                     self.y_offset < self.targetY + self.target_sprite_height and
@@ -535,14 +541,38 @@ class CameraWidget(QMainWindow):
                     self.generateTarget()
 
         # --------------------
-        # Display the Frame
+        # Display the Frame with Hearts & Score
         # --------------------
-        # Use the processed frame or edge mask depending on edgesMode.
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
 
-        # Draw the score text on the display frame.
-        cv2.putText(disp, f"Score: {self.score}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # Draw the hearts (always visible from the beginning)
+        if self.heartSprite is not None:
+            heart_h, heart_w = self.heartSprite.shape[:2]
+            margin = 5
+            start_x = 10
+            start_y = 10
+            # Draw three hearts side by side.
+            for i in range(3):
+                x = start_x + i * (heart_w + margin)
+                y = start_y
+                if self.heartSprite.shape[2] == 4:
+                    heart_bgr = self.heartSprite[:, :, :3]
+                    alpha_channel = self.heartSprite[:, :, 3] / 255.0
+                    alpha = np.dstack([alpha_channel] * 3)
+                    roi = disp[y:y+heart_h, x:x+heart_w]
+                    blended = (alpha * heart_bgr.astype(float) + (1 - alpha) * roi.astype(float)).astype(np.uint8)
+                    disp[y:y+heart_h, x:x+heart_w] = blended
+                else:
+                    disp[y:y+heart_h, x:x+heart_w] = self.heartSprite
+            # Draw the score text underneath the hearts.
+            text_x = 10
+            text_y = start_y + heart_h + 30  # adjust vertical spacing as desired
+            cv2.putText(disp, f"Score: {self.score}", (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        else:
+            # Fallback: if heart sprite is not loaded, just draw the score at (10,30)
+            cv2.putText(disp, f"Score: {self.score}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
         self.lastFrame = disp
         height, width, channel = disp.shape
