@@ -59,7 +59,7 @@ class CameraWidget(QMainWindow):
         # Target Sprite & Scoring
         # --------------------------
         self.score = 0
-        self.targetSprite = None  # The target sprite image.
+        self.targetSprite = None  # The target (coin) sprite image.
         self.targetX = 0          # Target sprite horizontal position.
         self.targetY = 0          # Target sprite vertical position.
         self.target_sprite_width = 0
@@ -68,7 +68,7 @@ class CameraWidget(QMainWindow):
         # --------------------------
         # Heart Sprite (Lives Display)
         # --------------------------
-        # Load the heart sprite immediately so that it is displayed from the very beginning.
+        # Load the heart sprite immediately so that it is always displayed.
         heart_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0003.png"
         self.heartSprite = cv2.imread(heart_sprite_path, cv2.IMREAD_UNCHANGED)
         if self.heartSprite is None:
@@ -187,7 +187,7 @@ class CameraWidget(QMainWindow):
             self.spawned = True
             self.score = 0  # reset score on new spawn
             self.reset_gameplay()
-            # Load the target sprite for scoring.
+            # Load the target (coin) sprite.
             target_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0002.png"
             self.targetSprite = cv2.imread(target_sprite_path, cv2.IMREAD_UNCHANGED)
             if self.targetSprite is None:
@@ -198,7 +198,7 @@ class CameraWidget(QMainWindow):
             print("Player spawned!")
 
     def reset_gameplay(self):
-        """Load the sprite and initialize its movement variables.
+        """Load the player sprite and initialize its movement variables.
            If the sprite was hidden during calibration, its saved position is used."""
         sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
         self.sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
@@ -238,8 +238,8 @@ class CameraWidget(QMainWindow):
 
     def generateTarget(self):
         """
-        Randomly generate a new target sprite position within the upper quarter of the camera frame,
-        ensuring that the target does not spawn inside any averaged bounding box.
+        Randomly generate a new target (coin) sprite position within the upper quarter of the camera frame,
+        ensuring that the coin does not spawn inside any averaged bounding box or too near the fixed hearts display.
         """
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -248,18 +248,43 @@ class CameraWidget(QMainWindow):
         attempt = 0
         new_x = 0
         new_y = 0
+
+        # Compute the hearts region as displayed.
+        # Hearts are drawn at (10,10) with three hearts side by side and a margin of 5.
+        if self.heartSprite is not None:
+            heart_h, heart_w = self.heartSprite.shape[:2]
+            hearts_x = 10
+            hearts_y = 10
+            hearts_width = heart_w * 3 + 2 * 5  # three hearts with two gaps of 5 pixels
+            # Determine the bottom of the hearts display.
+            hearts_bottom = hearts_y + heart_h
+            # Enforce that coins spawn at least 30 pixels below the hearts.
+            min_target_y = hearts_bottom + 30
+        else:
+            min_target_y = 0
+
         while attempt < max_attempts and not valid:
             new_x = random.randint(0, max(0, frame_width - self.target_sprite_width))
             # Spawn coin in the upper quarter of the room.
-            max_y = max(0, (frame_height // 4) - self.target_sprite_height)
-            new_y = random.randint(0, max_y)
+            max_target_y = max(0, (frame_height // 4) - self.target_sprite_height)
+            # If min_target_y is less than max_target_y, generate within that range;
+            # otherwise, generate normally.
+            if min_target_y < max_target_y:
+                new_y = random.randint(min_target_y, max_target_y)
+            else:
+                new_y = random.randint(0, max_target_y)
             valid = True
-            # If there are any bounding boxes, ensure the target does not intersect them.
+            # Ensure the coin does not intersect any averaged bounding box (platform).
             for (bx, by, bw, bh) in self.capturedCoords:
                 if self.rectangles_intersect(new_x, new_y, self.target_sprite_width, self.target_sprite_height,
                                              bx, by, bw, bh):
                     valid = False
                     break
+            # Also ensure the coin does not spawn too near the hearts area.
+            if valid and self.heartSprite is not None:
+                if self.rectangles_intersect(new_x, new_y, self.target_sprite_width, self.target_sprite_height,
+                                             hearts_x, hearts_y, hearts_width, heart_h):
+                    valid = False
             attempt += 1
         self.targetX = new_x
         self.targetY = new_y
@@ -275,7 +300,6 @@ class CameraWidget(QMainWindow):
     # --------------------------
     def updateLowerLabel(self, value):
         self.lowerLabel.setText(f"Canny Lower Threshold: {value}")
-        # When thresholds change, if a sprite is active, hide it.
         if self.spawned:
             self.hideSprite()
         if self.freezeBoxes:
@@ -283,7 +307,6 @@ class CameraWidget(QMainWindow):
 
     def updateUpperLabel(self, value):
         self.upperLabel.setText(f"Canny Upper Threshold: {value}")
-        # When thresholds change, if a sprite is active, hide it.
         if self.spawned:
             self.hideSprite()
         if self.freezeBoxes:
@@ -297,7 +320,6 @@ class CameraWidget(QMainWindow):
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
-            # Toggle the control bar overlay using the H key.
             if event.key() == Qt.Key_H:
                 visible = not self.controlBarOverlay.isVisible()
                 self.controlBarOverlay.setVisible(visible)
@@ -344,8 +366,6 @@ class CameraWidget(QMainWindow):
             self.edgesViewButton.setText("Edge Detection")
 
     def manualCalibrate(self):
-        """Reset calibration counters and start auto-calibration.
-           Also hide the sprite (if present) and reset bounding box averaging."""
         if self.spawned:
             self.hideSprite()
         self.autoCalibrateButton.setText("Autocalibrating")
@@ -356,7 +376,6 @@ class CameraWidget(QMainWindow):
         self.reset_bbox_accumulation()
 
     def onCalibrationComplete(self):
-        """Called after auto-calibration delay; resets button text and respawns sprite if needed."""
         self.autoCalibrateButton.setText("Auto Calibrate")
         if self.savedSpritePos is not None:
             self.respawnSprite(self.savedSpritePos)
@@ -370,13 +389,12 @@ class CameraWidget(QMainWindow):
         if not ret:
             return
 
-        # Process for edge detection:
+        # Process for edge detection.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_equalized = clahe.apply(gray)
         blurred = cv2.GaussianBlur(gray_equalized, (5, 5), 0)
 
-        # --- Auto-adjust thresholds (if not already calibrated) ---
         if not self.autoThresholdCalibrated:
             median_val = np.median(blurred)
             scale_factor = 0.26
@@ -417,7 +435,6 @@ class CameraWidget(QMainWindow):
         smoothedBoxes = self.smoothBoxes(newBoxes, self.prevBoxes, alpha=0.5, distance_threshold=20)
         self.prevBoxes = smoothedBoxes
 
-        # --- Bounding Box Averaging (only if sprite is not spawned) ---
         if not self.spawned:
             if not self.freezeBoxes:
                 if smoothedBoxes:
@@ -431,36 +448,26 @@ class CameraWidget(QMainWindow):
             else:
                 smoothedBoxes = self.capturedCoords
         else:
-            # In spawn mode, ignore bounding boxes for drawing,
-            # but continue to use the capturedCoords for platform collision.
             smoothedBoxes = []
 
-        # Draw bounding boxes (only if sprite is not spawned)
         if not self.spawned:
             for box in smoothedBoxes:
                 x, y, w, h = box
                 cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (0, 255, 0), thickness=2)
 
-        # --------------
-        # Gameplay Code
-        # --------------
         if self.spawned:
-            # Calculate ground level based on current frame height.
             ground_y = frame.shape[0] - self.sprite_height
             self.ground_y = ground_y
 
-            # Horizontal movement:
             if self.key_state.get("a", False):
                 self.x_offset -= self.move_step
             if self.key_state.get("d", False):
                 self.x_offset += self.move_step
             self.x_offset = max(0, min(self.x_offset, frame.shape[1] - self.sprite_width))
 
-            # On first spawn, if y_offset is 0 and not jumping, place the sprite on the ground.
             if self.y_offset == 0 and not self.is_jumping:
                 self.y_offset = ground_y
 
-            # Check if the sprite is supported by a platform (from capturedCoords) or the ground.
             if not self.is_jumping:
                 supported = False
                 tolerance = 5
@@ -475,18 +482,16 @@ class CameraWidget(QMainWindow):
                     self.is_jumping = True
                     self.jump_velocity = 0
 
-            # Initiate jump if space is pressed and the sprite is supported.
+            # Buffed jump: set the jump velocity to -14 instead of -15.
             if self.key_state.get("space", False) and not self.is_jumping:
                 self.is_jumping = True
-                self.jump_velocity = -15
-                self.key_state["space"] = False  # consume the key
+                self.jump_velocity = -14
+                self.key_state["space"] = False
 
-            # Jump physics:
             if self.is_jumping:
                 prev_y_offset = self.y_offset
                 self.y_offset += self.jump_velocity
                 self.jump_velocity += self.gravity
-                # If falling down, check for landing on any platform.
                 if self.jump_velocity > 0:
                     landed = False
                     for (plat_x, plat_y, plat_w, plat_h) in self.capturedCoords:
@@ -501,13 +506,11 @@ class CameraWidget(QMainWindow):
                         self.y_offset = ground_y
                         self.is_jumping = False
                         self.jump_velocity = 0
-                # If the sprite goes above the top of the screen, clamp it at 0 and cancel upward velocity.
                 if self.y_offset < 0:
                     self.y_offset = 0
                     if self.jump_velocity < 0:
                         self.jump_velocity = 0
 
-            # Overlay the player sprite onto the frame.
             if self.sprite is not None:
                 if self.sprite.shape[2] == 4:
                     sprite_bgr = self.sprite[:, :, :3]
@@ -519,7 +522,6 @@ class CameraWidget(QMainWindow):
                 else:
                     frame[self.y_offset:self.y_offset+self.sprite_height, self.x_offset:self.x_offset+self.sprite_width] = self.sprite
 
-            # --- Draw the target sprite and check collision ---
             if self.targetSprite is not None:
                 tx, ty = self.targetX, self.targetY
                 if self.targetSprite.shape[2] == 4:
@@ -540,18 +542,14 @@ class CameraWidget(QMainWindow):
                     print("Score increased to", self.score)
                     self.generateTarget()
 
-        # --------------------
-        # Display the Frame with Hearts & Score
-        # --------------------
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
 
-        # Draw the hearts (always visible from the beginning)
+        # Draw the fixed hearts at the top left and the score below them.
         if self.heartSprite is not None:
             heart_h, heart_w = self.heartSprite.shape[:2]
             margin = 5
             start_x = 10
             start_y = 10
-            # Draw three hearts side by side.
             for i in range(3):
                 x = start_x + i * (heart_w + margin)
                 y = start_y
@@ -570,7 +568,6 @@ class CameraWidget(QMainWindow):
             cv2.putText(disp, f"Score: {self.score}", (text_x, text_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         else:
-            # Fallback: if heart sprite is not loaded, just draw the score at (10,30)
             cv2.putText(disp, f"Score: {self.score}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
@@ -587,10 +584,6 @@ class CameraWidget(QMainWindow):
             self.updateSliderOverlayPosition()
 
     def average_bounding_boxes(self, bbox_list):
-        """
-        Given a list of lists of bounding boxes (each box is a tuple (x, y, w, h)),
-        compute an average bounding box for each object using the first frame as reference.
-        """
         if not bbox_list:
             return []
         reference_boxes = bbox_list[0]
@@ -619,11 +612,6 @@ class CameraWidget(QMainWindow):
         return averaged_boxes
 
     def smoothBoxes(self, newBoxes, prevBoxes, alpha=0.5, distance_threshold=20):
-        """
-        Smooth new bounding boxes by comparing with previous boxes.
-        For each new box, if a previous box's center is within the distance_threshold,
-        update its coordinates using exponential smoothing; otherwise, use the new box.
-        """
         smoothed = []
         used_prev = [False] * len(prevBoxes)
         for nb in newBoxes:
