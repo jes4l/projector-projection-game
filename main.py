@@ -4,12 +4,16 @@ import numpy as np
 import random
 import serial
 import threading  # For scheduling delayed key releases
+import pygame
 from PyQt5.QtCore import Qt, QTimer, QEvent, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QPushButton,
     QSlider, QVBoxLayout, QWidget, QHBoxLayout
 )
+
+# Initialize pygame mixer
+pygame.mixer.init()
 
 class CameraWidget(QMainWindow):
     def __init__(self):
@@ -74,6 +78,28 @@ class CameraWidget(QMainWindow):
         self.heartSprite = cv2.imread(heart_sprite_path, cv2.IMREAD_UNCHANGED)
         if self.heartSprite is None:
             print(f"Error: Could not load heart sprite from {heart_sprite_path}")
+
+        # --------------------------
+        # Sound Effects using pygame.mixer
+        # --------------------------
+        # Load short sound effects
+        self.jump_sound = pygame.mixer.Sound(r"C:\Users\LLR User\Desktop\your-childhood-game\bounding-box.mp3")
+        self.coin_sound = pygame.mixer.Sound(r"C:\Users\LLR User\Desktop\your-childhood-game\coin.mp3")
+        self.scream_sound = pygame.mixer.Sound(r"C:\Users\LLR User\Desktop\your-childhood-game\scream.mp3")
+        # Load background music and play it on loop
+        pygame.mixer.music.load(r"C:\Users\LLR User\Desktop\your-childhood-game\background-music.mp3")
+        pygame.mixer.music.play(-1)
+
+        # Initialize particle lists.
+        self.coin_particles = []
+        self.heart_particles = []
+        # For the platform glow effect:
+        self.platform_glow_triggered = []
+        self.platform_glow_color = []
+        self.platform_particles = []
+
+        # Flag to play jump sound only once per landing.
+        self.justLanded = False
 
         # --------------------------
         # UI Setup
@@ -199,14 +225,11 @@ class CameraWidget(QMainWindow):
         # NEW: Variables to prevent rapid collisions and tint the sprite.
         self.invulnerable = False
         self.red_tint = False
-        # NEW: Initialize coin particle system.
-        self.coin_particles = []
 
     # --------------------------
     # Sprite & Gameplay Methods
     # --------------------------
     def spawnPlayer(self):
-        """Called when Spawn is clicked. Initializes gameplay if not already spawned."""
         if not self.spawned:
             self.spawned = True
             self.score = 0  # reset score on new spawn
@@ -221,7 +244,6 @@ class CameraWidget(QMainWindow):
             print("Player spawned!")
 
     def reset_gameplay(self):
-        """Load the player sprite and initialize its movement variables."""
         sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
         self.sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
         if self.sprite is None:
@@ -238,9 +260,9 @@ class CameraWidget(QMainWindow):
         self.gravity = 1
         self.move_step = 5
         self.key_state = {"a": False, "d": False, " ": False}
+        self.justLanded = False
 
     def hideSprite(self):
-        """If the sprite is visible, save its position and hide it."""
         if self.spawned:
             self.savedSpritePos = (self.x_offset, self.y_offset)
             self.spawned = False
@@ -248,7 +270,6 @@ class CameraWidget(QMainWindow):
             print("Sprite hidden for calibration, saved position:", self.savedSpritePos)
 
     def respawnSprite(self, pos):
-        """Respawn the sprite at the given position."""
         self.savedSpritePos = None
         self.spawned = True
         self.reset_gameplay()
@@ -256,10 +277,6 @@ class CameraWidget(QMainWindow):
         print("Sprite respawned at", pos)
 
     def generateTarget(self):
-        """
-        Randomly generate a new target (coin) sprite position within the upper quarter,
-        ensuring it does not spawn inside any averaged bounding box or too near the hearts.
-        """
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         max_attempts = 10
@@ -267,7 +284,6 @@ class CameraWidget(QMainWindow):
         attempt = 0
         new_x = 0
         new_y = 0
-
         if self.heartSprite is not None:
             heart_h, heart_w = self.heartSprite.shape[:2]
             hearts_x = 10
@@ -277,7 +293,6 @@ class CameraWidget(QMainWindow):
             min_target_y = hearts_bottom + 30
         else:
             min_target_y = 0
-
         while attempt < max_attempts and not valid:
             new_x = random.randint(0, max(0, frame_width - self.target_sprite_width))
             max_target_y = max(0, (frame_height // 4) - self.target_sprite_height)
@@ -297,7 +312,6 @@ class CameraWidget(QMainWindow):
         self.targetY = new_y
 
     def rectangles_intersect(self, x1, y1, w1, h1, x2, y2, w2, h2):
-        """Return True if the two rectangles intersect."""
         return not (x1 + w1 <= x2 or x1 >= x2 + w2 or y1 + h1 <= y2 or y1 >= y2 + h2)
 
     # --------------------------
@@ -318,10 +332,15 @@ class CameraWidget(QMainWindow):
             self.reset_bbox_accumulation()
 
     def reset_bbox_accumulation(self):
-        """Reset the bounding box accumulator so that averaging will restart."""
         self.bboxAcc = []
         self.bboxCount = 0
         self.freezeBoxes = False
+        # Reinitialize particle systems so effects work after recalibration.
+        self.platform_glow_triggered = []
+        self.platform_glow_color = []
+        self.platform_particles = []
+        self.coin_particles = []
+        self.heart_particles = []
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
@@ -479,10 +498,8 @@ class CameraWidget(QMainWindow):
             if self.key_state.get("d", False):
                 self.x_offset += self.move_step
 
-            # NEW: Clamp player's x to screen bounds.
+            # Clamp to screen bounds.
             self.x_offset = max(0, min(self.x_offset, frame.shape[1] - self.sprite_width))
-
-            # NEW: Horizontal collision with platforms.
             for (plat_x, plat_y, plat_w, plat_h) in self.capturedCoords:
                 if self.rectangles_intersect(self.x_offset, self.y_offset, self.sprite_width, self.sprite_height,
                                              plat_x, plat_y, plat_w, plat_h):
@@ -511,6 +528,7 @@ class CameraWidget(QMainWindow):
                 self.is_jumping = True
                 self.jump_velocity = -15
                 self.key_state[" "] = False
+                self.justLanded = False
 
             if self.is_jumping:
                 prev_y_offset = self.y_offset
@@ -522,12 +540,19 @@ class CameraWidget(QMainWindow):
                         if self.x_offset + self.sprite_width > plat_x and self.x_offset < plat_x + plat_w:
                             if (prev_y_offset + self.sprite_height <= plat_y) and (self.y_offset + self.sprite_height >= plat_y):
                                 self.y_offset = int(plat_y - self.sprite_height)
+                                if not self.justLanded:
+                                    # Play jump sound when landing on a platform.
+                                    pygame.mixer.Sound.play(self.jump_sound)
+                                    self.justLanded = True
                                 self.is_jumping = False
                                 self.jump_velocity = 0
                                 landed = True
                                 break
                     if not landed and self.y_offset >= ground_y:
                         self.y_offset = ground_y
+                        if self.is_jumping and not self.justLanded:
+                            pygame.mixer.Sound.play(self.jump_sound)
+                            self.justLanded = True
                         self.is_jumping = False
                         self.jump_velocity = 0
                 if self.y_offset < 0:
@@ -536,7 +561,6 @@ class CameraWidget(QMainWindow):
                         self.jump_velocity = 0
 
             if self.sprite is not None:
-                # NEW: Draw the player sprite (red tinted if active)
                 if self.sprite.shape[2] == 4:
                     sprite_bgr = self.sprite[:, :, :3]
                     if self.red_tint:
@@ -566,14 +590,14 @@ class CameraWidget(QMainWindow):
                 else:
                     frame[ty:ty+self.target_sprite_height, tx:tx+self.target_sprite_width] = self.targetSprite
 
-                # NEW: Coin collection detection and particle burst.
                 if (self.x_offset < self.targetX + self.target_sprite_width and
                     self.x_offset + self.sprite_width > self.targetX and
                     self.y_offset < self.targetY + self.target_sprite_height and
                     self.y_offset + self.sprite_height > self.targetY):
                     self.score += 1
                     print("Score increased to", self.score)
-                    # Spawn coin particles (gold) at the coin's center.
+                    # Play coin sound.
+                    pygame.mixer.Sound.play(self.coin_sound)
                     for _ in range(10):
                         particle = {
                             'x': self.targetX + self.target_sprite_width / 2,
@@ -587,9 +611,22 @@ class CameraWidget(QMainWindow):
                         self.coin_particles.append(particle)
                     self.generateTarget()
 
+        # Process coin particles.
+        new_coin_particles = []
+        for particle in self.coin_particles:
+            particle['x'] += particle['vx']
+            particle['y'] += particle['vy']
+            particle['life'] -= 1
+            if particle['life'] > 0:
+                new_coin_particles.append(particle)
+                cx = int(particle['x'])
+                cy = int(particle['y'])
+                cv2.circle(frame, (cx, cy), particle['radius'], (0,215,255), thickness=-1)
+        self.coin_particles = new_coin_particles
+
         disp = cv2.cvtColor(closed_edges, cv2.COLOR_GRAY2BGR) if self.edgesMode else frame
 
-        # Draw the fixed hearts and score.
+        # Draw hearts and score.
         if self.heartSprite is not None:
             heart_h, heart_w = self.heartSprite.shape[:2]
             margin = 5
@@ -607,6 +644,30 @@ class CameraWidget(QMainWindow):
                     disp[y:y+heart_h, x:x+heart_w] = blended
                 else:
                     disp[y:y+heart_h, x:x+heart_w] = self.heartSprite
+            # Spawn heart particle effects when a heart is lost.
+            if hasattr(self, 'prev_lives'):
+                if self.lives < self.prev_lives:
+                    lost_index = self.lives
+                    if self.heartSprite is not None:
+                        heart_w = self.heartSprite.shape[1]
+                        heart_h = self.heartSprite.shape[0]
+                    else:
+                        heart_w, heart_h = 30, 30
+                    heart_x = 10 + lost_index * (heart_w + margin)
+                    heart_y = 10
+                    for _ in range(10):
+                        particle = {
+                            'x': heart_x + heart_w / 2,
+                            'y': heart_y + heart_h / 2,
+                            'vx': random.uniform(-2, 2),
+                            'vy': random.uniform(-2, 0),
+                            'life': random.randint(30, 45),
+                            'max_life': 45,
+                            'radius': random.randint(1, 3)
+                        }
+                        self.heart_particles.append(particle)
+            self.prev_lives = self.lives
+
             text_x = 10
             text_y = start_y + heart_h + 30
             cv2.putText(disp, f"Score: {self.score}", (text_x, text_y),
@@ -615,13 +676,25 @@ class CameraWidget(QMainWindow):
             cv2.putText(disp, f"Score: {self.score}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # NEW: Process enemy sprites.
+        # Process heart particles.
+        new_heart_particles = []
+        for particle in self.heart_particles:
+            particle['x'] += particle['vx']
+            particle['y'] += particle['vy']
+            particle['life'] -= 1
+            if particle['life'] > 0:
+                new_heart_particles.append(particle)
+                cx = int(particle['x'])
+                cy = int(particle['y'])
+                cv2.circle(disp, (cx, cy), particle['radius'], (0,215,255), thickness=-1)
+        self.heart_particles = new_heart_particles
+
+        # Process enemy sprites.
         if self.autoThresholdCalibrated and self.spawned:
             frame_width = disp.shape[1]
             for enemy in self.enemies:
                 enemy_width = self.enemySprite_width if self.enemySprite is not None else 50
                 enemy_height = self.enemySprite_height if self.enemySprite is not None else 50
-                # Prevent enemy from spawning inside any platform.
                 in_platform = False
                 for platform in self.capturedCoords:
                     if self.rectangles_intersect(enemy['x'], enemy['y'], enemy_width, enemy_height,
@@ -644,7 +717,6 @@ class CameraWidget(QMainWindow):
                             enemy['x'] = candidate_x
                         attempts += 1
 
-                # Predict horizontal movement and reverse if collision with a platform.
                 predicted_x = enemy['x'] + enemy['direction'] * enemy['speed']
                 collision = False
                 for platform in self.capturedCoords:
@@ -685,6 +757,27 @@ class CameraWidget(QMainWindow):
                             player_y + player_h <= enemy['y'] or player_y >= enemy['y'] + enemy_height):
                         self.lives -= 1
                         print("Player hit by enemy! Lives remaining:", self.lives)
+                        pygame.mixer.Sound.play(self.scream_sound)
+                        # Spawn heart particles for lost heart.
+                        heart_index = self.lives
+                        if self.heartSprite is not None:
+                            heart_w = self.heartSprite.shape[1]
+                            heart_h = self.heartSprite.shape[0]
+                        else:
+                            heart_w, heart_h = 30, 30
+                        heart_x = 10 + heart_index * (heart_w + 5)
+                        heart_y = 10
+                        for _ in range(10):
+                            particle = {
+                                'x': heart_x + heart_w / 2,
+                                'y': heart_y + heart_h / 2,
+                                'vx': random.uniform(-2, 2),
+                                'vy': random.uniform(-2, 0),
+                                'life': random.randint(30, 45),
+                                'max_life': 45,
+                                'radius': random.randint(1, 3)
+                            }
+                            self.heart_particles.append(particle)
                         self.invulnerable = True
                         self.red_tint = True
                         QTimer.singleShot(1000, self.reset_invulnerability)
@@ -698,19 +791,18 @@ class CameraWidget(QMainWindow):
                             subprocess.Popen(["python", "start.py"])
                             QApplication.quit()
 
-        # NEW: Update and draw coin particles (gold) from coin collection.
-        new_coin_particles = []
-        for particle in self.coin_particles:
+        # Process heart particles.
+        new_heart_particles = []
+        for particle in self.heart_particles:
             particle['x'] += particle['vx']
             particle['y'] += particle['vy']
             particle['life'] -= 1
             if particle['life'] > 0:
-                new_coin_particles.append(particle)
+                new_heart_particles.append(particle)
                 cx = int(particle['x'])
                 cy = int(particle['y'])
-                # Draw as a filled circle in gold (BGR: (0,215,255))
                 cv2.circle(disp, (cx, cy), particle['radius'], (0,215,255), thickness=-1)
-        self.coin_particles = new_coin_particles
+        self.heart_particles = new_heart_particles
 
         # NEW: Platform glow with particle effects.
         if self.freezeBoxes and hasattr(self, 'platform_glow_triggered') and self.spawned and self.sprite is not None:
@@ -722,7 +814,6 @@ class CameraWidget(QMainWindow):
                     if not self.platform_glow_triggered[i]:
                         self.platform_glow_triggered[i] = True
                         self.platform_glow_color[i] = random.choice([(255, 0, 0), (128, 0, 128), (0, 0, 255), (0, 165, 255)])
-                    # Emit fewer particles per frame (3 instead of 5) with smaller radius.
                     for _ in range(3):
                         particle = {
                             'x': random.uniform(plat[0], plat[0] + plat[2]),
@@ -878,7 +969,6 @@ class SerialReaderThread(QThread):
             except Exception as e:
                 print("Decoding error:", e)
                 continue
-
             if char == 'a':
                 self.key_signal.emit('a', True)
                 threading.Timer(0.3, lambda: self.key_signal.emit('a', False)).start()
