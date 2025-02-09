@@ -5,8 +5,9 @@ import random
 import serial
 import threading  # For scheduling delayed key releases
 import csv
-import pygame  # NEW: For sound playback using pygame mixer
-from PyQt5.QtCore import Qt, QTimer, QEvent, QThread, pyqtSignal, QUrl
+import pygame  # For sound playback using pygame mixer
+import time    # Added for timing the “on platform” duration
+from PyQt5.QtCore import Qt, QTimer, QEvent, QThread, pyqtSignal, QUrl, QObject
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
     QApplication, QLabel, QMainWindow, QPushButton,
@@ -61,6 +62,12 @@ class CameraWidget(QMainWindow):
         self.key_state = {"a": False, "d": False, " ": False}
         # When calibration is triggered while the sprite is visible, its position is saved.
         self.savedSpritePos = None
+
+        # NEW: Attributes for the transformation feature.
+        # If the player stays on the highest bounding box for 5 seconds,
+        # then the sprite will change to sprite005.
+        self.on_highest_platform_start_time = None
+        self.has_transformed = False
 
         # --------------------------
         # Target Sprite & Scoring
@@ -217,10 +224,10 @@ class CameraWidget(QMainWindow):
         else:
             self.enemySprite_height, self.enemySprite_width = self.enemySprite.shape[:2]
         self.enemies = []  # List of enemy dictionaries
-        self.enemy_speed = 2  # Speed of enemy movement in pixels per frame
+        self.enemy_speed = 1.5  # Speed of enemy movement in pixels per frame
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        for i in range(3):
+        for i in range(2):
             enemy = {}
             enemy['x'] = random.randint(0, max(0, frame_width - (self.enemySprite_width if self.enemySprite is not None else 50)))
             enemy['y'] = frame_height - (self.enemySprite_height if self.enemySprite is not None else 50)
@@ -272,6 +279,9 @@ class CameraWidget(QMainWindow):
         self.move_step = 5
         self.key_state = {"a": False, "d": False, " ": False}
         self.justLanded = False
+        # Reset transformation attributes:
+        self.on_highest_platform_start_time = None
+        self.has_transformed = False
 
     def hideSprite(self):
         if self.spawned:
@@ -354,8 +364,7 @@ class CameraWidget(QMainWindow):
         self.platform_particles = []
         self.coin_particles = []
         self.heart_particles = []
-        # Also hide ambient background.
-        self.ambientVisible = False
+        # Note: ambientVisible is no longer forced to False here.
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
@@ -409,7 +418,7 @@ class CameraWidget(QMainWindow):
         self.medianCount = 0
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
-        # NEW: Hide ambient background upon calibration.
+        # Hide ambient background upon calibration.
         self.ambientVisible = False
         self.reset_bbox_accumulation()
 
@@ -418,6 +427,9 @@ class CameraWidget(QMainWindow):
         if self.savedSpritePos is not None:
             self.respawnSprite(self.savedSpritePos)
         self.reset_bbox_accumulation()
+        # Re-enable ambient background if the player is spawned.
+        if self.spawned:
+            self.ambientVisible = True
 
     # NEW: Helper methods to reset invulnerability and red tint.
     def reset_invulnerability(self):
@@ -591,6 +603,31 @@ class CameraWidget(QMainWindow):
                     self.y_offset = 0
                     if self.jump_velocity < 0:
                         self.jump_velocity = 0
+
+            # --- NEW: Check if the player is standing on the highest bounding box ---
+            if self.spawned and self.capturedCoords and (len(self.capturedCoords) > 0) and not self.has_transformed:
+                # Determine the highest platform (the one with the smallest y coordinate)
+                highest_box = min(self.capturedCoords, key=lambda b: b[1])
+                tolerance = 5
+                # Check if the player's sprite is “on” this platform
+                if (self.x_offset + self.sprite_width > highest_box[0] and
+                    self.x_offset < highest_box[0] + highest_box[2] and
+                    abs((self.y_offset + self.sprite_height) - highest_box[1]) < tolerance):
+                    if self.on_highest_platform_start_time is None:
+                        self.on_highest_platform_start_time = time.time()
+                    elif time.time() - self.on_highest_platform_start_time >= 5.0:
+                        # Change the sprite to sprite005
+                        sprite005_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0005.png"
+                        new_sprite = cv2.imread(sprite005_path, cv2.IMREAD_UNCHANGED)
+                        if new_sprite is None:
+                            print(f"Error: Could not load sprite from {sprite005_path}")
+                        else:
+                            self.sprite = new_sprite
+                            self.sprite_height, self.sprite_width = new_sprite.shape[:2]
+                            self.has_transformed = True
+                            print("Player transformed to sprite005!")
+                else:
+                    self.on_highest_platform_start_time = None
 
             if self.sprite is not None:
                 if self.sprite.shape[2] == 4:
@@ -782,7 +819,7 @@ class CameraWidget(QMainWindow):
                         self.lives -= 1
                         print("Player hit by enemy! Lives remaining:", self.lives)
                         pygame.mixer.Sound.play(self.scream_sound)
-                        # NEW: Record the score in a CSV file when lives reach 0.
+                        # Record the score in a CSV file when lives reach 0.
                         if self.lives <= 0:
                             with open("scores.csv", "a", newline="") as f:
                                 writer = csv.writer(f)
@@ -816,7 +853,7 @@ class CameraWidget(QMainWindow):
                             print("No lives left! Game Over.")
                             self.cap.release()
                             import subprocess
-                            subprocess.Popen(["python", "start.py"])
+                            subprocess.Popen(["python", "main.py"])
                             QApplication.quit()
 
         new_heart_particles = []
@@ -1018,8 +1055,6 @@ class SerialReaderThread(QThread):
 # ------------------------------------------------------------------------------
 # NEW: Event filter to trigger auto calibration on 'c' key press.
 # ------------------------------------------------------------------------------
-from PyQt5.QtCore import QObject
-
 class AutoCalibrateKeyFilter(QObject):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.KeyPress:
