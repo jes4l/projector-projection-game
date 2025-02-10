@@ -3,10 +3,9 @@ import cv2
 import numpy as np
 import random
 import serial
-import threading  # For scheduling delayed key releases
+import threading
 import csv
-import pygame  # For sound playback using pygame mixer
-import time    # For timing the sprite toggle
+import pygame
 from PyQt5.QtCore import Qt, QTimer, QEvent, QThread, pyqtSignal, QUrl
 from PyQt5.QtGui import QImage, QPixmap, QFont
 from PyQt5.QtWidgets import (
@@ -14,107 +13,65 @@ from PyQt5.QtWidgets import (
     QSlider, QVBoxLayout, QWidget, QHBoxLayout
 )
 
-# Initialize pygame mixer
 pygame.mixer.init()
 
 class CameraWidget(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Game")
-        # Ensure the window gets key events.
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFocus()
-
-        # Use a modern font for the entire application.
         app_font = QFont("Segoe UI", 10)
         self.setFont(app_font)
-
-        # --------------------------
-        # Computer Vision Variables
-        # --------------------------
-        self.edgesMode = False               # Toggle raw edge mask vs. overlay view.
-        self.prevBoxes = []                  # For smoothing bounding boxes.
-        self.autoAdjustFrames = 100          # Number of frames for auto-calibration.
+        self.edgesMode = False
+        self.prevBoxes = []
+        self.autoAdjustFrames = 100
         self.medianSum = 0.0
         self.medianCount = 0
-        self.autoThresholdCalibrated = False # Flag for auto calibration.
-        self.lastFrame = None                # Holds the last processed frame.
-        self.capturedCoords = []             # Holds averaged bounding boxes.
-
-        # For accumulating bounding boxes over several frames.
-        self.bboxAcc = []        # List of lists of bounding boxes per frame.
-        self.bboxCount = 0       # How many frames accumulated.
-        self.freezeBoxes = False # When True, freeze bounding boxes (use averaged ones).
-
-        # --------------------------
-        # Spawn / Gameplay Variables
-        # --------------------------
-        self.spawned = False     # Will be set True when the Spawn button is clicked.
-        self.sprite = None       # The player sprite image.
-        self.x_offset = 0        # Sprite horizontal position.
-        self.y_offset = 0        # Sprite vertical position.
-        self.ground_y = 0        # Calculated ground level.
-        self.move_step = 5       # Pixels moved per frame horizontally.
-        self.is_jumping = False  # Jump state.
-        self.jump_velocity = 0   # Current jump vertical velocity.
-        self.gravity = 1         # Gravity per frame.
-        # Dictionary to hold current key states.
+        self.autoThresholdCalibrated = False
+        self.lastFrame = None
+        self.capturedCoords = []
+        self.bboxAcc = []
+        self.bboxCount = 0
+        self.freezeBoxes = False
+        self.spawned = False
+        self.sprite = None
+        self.x_offset = 0
+        self.y_offset = 0
+        self.ground_y = 0
+        self.move_step = 5
+        self.is_jumping = False
+        self.jump_velocity = 0
+        self.gravity = 1
         self.key_state = {"a": False, "d": False, " ": False}
-        # When calibration is triggered while the sprite is visible, its position is saved.
         self.savedSpritePos = None
-
-        # New attributes to support sprite toggling:
-        self.current_sprite = "sprite001"  # Either "sprite001" or "sprite005"
-        self.on_highest_since = None       # Time stamp when player first stood on the highest box
-
-        # --------------------------
-        # Target Sprite & Scoring
-        # --------------------------
         self.score = 0
-        self.targetSprite = None  # The target (coin) sprite image.
-        self.targetX = 0          # Target sprite horizontal position.
-        self.targetY = 0          # Target sprite vertical position.
+        self.targetSprite = None
+        self.targetX = 0
+        self.targetY = 0
         self.target_sprite_width = 0
         self.target_sprite_height = 0
 
-        # --------------------------
-        # Heart Sprite (Lives Display)
-        # --------------------------
         heart_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0003.png"
         self.heartSprite = cv2.imread(heart_sprite_path, cv2.IMREAD_UNCHANGED)
         if self.heartSprite is None:
             print(f"Error: Could not load heart sprite from {heart_sprite_path}")
 
-        # --------------------------
-        # Sound Effects using pygame.mixer
-        # --------------------------
         self.jump_sound = pygame.mixer.Sound(r"C:\Users\LLR User\Desktop\your-childhood-game\bounding-box.mp3")
         self.coin_sound = pygame.mixer.Sound(r"C:\Users\LLR User\Desktop\your-childhood-game\coin.mp3")
         self.scream_sound = pygame.mixer.Sound(r"C:\Users\LLR User\Desktop\your-childhood-game\scream.mp3")
         pygame.mixer.music.load(r"C:\Users\LLR User\Desktop\your-childhood-game\background-music.mp3")
-        pygame.mixer.music.play(-1)  # loop indefinitely
+        pygame.mixer.music.play(-1)
 
-        # --------------------------
-        # Ambient Background & Particle Effects
-        # --------------------------
-        # Ambient background particles will be created when spawn is clicked.
         self.ambientVisible = False
         self.ambient_particles = None
-
-        # Initialize particle lists.
         self.coin_particles = []
         self.heart_particles = []
-        # For the platform glow effect:
         self.platform_glow_triggered = []
         self.platform_glow_color = []
         self.platform_particles = []
-
-        # Flag to play jump sound only once per landing.
         self.justLanded = False
 
-        # --------------------------
-        # UI Setup
-        # --------------------------
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
         layout = QVBoxLayout(centralWidget)
@@ -126,7 +83,6 @@ class CameraWidget(QMainWindow):
         self.videoLabel.setStyleSheet("background-color: black;")
         layout.addWidget(self.videoLabel)
 
-        # --- Control Bar Overlay ---
         self.controlBarOverlay = QWidget(self.videoLabel)
         self.controlBarOverlay.setStyleSheet("background-color: rgba(50, 50, 50, 230); border: none;")
         self.controlBarOverlay.setVisible(False)
@@ -147,7 +103,6 @@ class CameraWidget(QMainWindow):
         controlLayout.addWidget(self.spawnButton)
         controlLayout.addStretch(1)
 
-        # --- Threshold Slider Overlay ---
         self.sliderOverlay = QWidget(self.videoLabel)
         self.sliderOverlay.setStyleSheet("background-color: rgba(40, 40, 40, 230); border: none;")
         self.sliderOverlay.setVisible(False)
@@ -196,60 +151,50 @@ class CameraWidget(QMainWindow):
         self.autoCalibrateButton.clicked.connect(self.manualCalibrate)
         sliderLayout.addWidget(self.autoCalibrateButton)
 
-        # --- Connect UI Buttons ---
         self.thresholdButton.clicked.connect(self.toggleSliderOverlay)
         self.edgesViewButton.clicked.connect(self.toggleEdgesMode)
         self.spawnButton.clicked.connect(self.spawnPlayer)
 
-        # --------------------------
-        # OpenCV Camera Capture
-        # --------------------------
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             print("Could not open camera")
             sys.exit()
         self.timer = QTimer()
         self.timer.timeout.connect(self.updateFrame)
-        self.timer.start(30)  # roughly 30 fps
+        self.timer.start(30)
 
         self.installEventFilter(self)
-
-        # NEW: Enemy Sprites Setup and Lives
+ 
         enemy_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0004.png"
         self.enemySprite = cv2.imread(enemy_sprite_path, cv2.IMREAD_UNCHANGED)
         if self.enemySprite is None:
             print(f"Error: Could not load enemy sprite from {enemy_sprite_path}")
         else:
             self.enemySprite_height, self.enemySprite_width = self.enemySprite.shape[:2]
-        self.enemies = []  # List of enemy dictionaries
-        self.enemy_speed = 1.5  # Speed of enemy movement in pixels per frame
+        self.enemies = []
+        self.enemy_speed = 2
         frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        for i in range(2):
+        for i in range(3):
             enemy = {}
             enemy['x'] = random.randint(0, max(0, frame_width - (self.enemySprite_width if self.enemySprite is not None else 50)))
             enemy['y'] = frame_height - (self.enemySprite_height if self.enemySprite is not None else 50)
             enemy['direction'] = random.choice([-1, 1])
             enemy['speed'] = self.enemy_speed
             self.enemies.append(enemy)
-        self.lives = 3  # Player lives
-        # NEW: Variables to prevent rapid collisions and tint the sprite.
+        self.lives = 3
         self.invulnerable = False
         self.red_tint = False
 
-    # --------------------------
-    # Sprite & Gameplay Methods
-    # --------------------------
     def spawnPlayer(self):
         if not self.spawned:
             self.spawned = True
-            self.score = 0  # reset score on new spawn
+            self.score = 0
             self.reset_gameplay()
-            # NEW: Close the entire widget menu and show ambient background.
             self.controlBarOverlay.setVisible(False)
             self.sliderOverlay.setVisible(False)
             self.ambientVisible = True
-            self.ambient_particles = None  # Force reinitialization
+            self.ambient_particles = None
             target_sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0002.png"
             self.targetSprite = cv2.imread(target_sprite_path, cv2.IMREAD_UNCHANGED)
             if self.targetSprite is None:
@@ -260,13 +205,7 @@ class CameraWidget(QMainWindow):
             print("Player spawned!")
 
     def reset_gameplay(self):
-        # Use the current sprite selection instead of always loading sprite001
-        if self.current_sprite == "sprite001":
-            sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
-        elif self.current_sprite == "sprite005":
-            sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0005.png"
-        else:
-            sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
+        sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
         self.sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
         if self.sprite is None:
             print(f"Error: Could not load sprite from {sprite_path}")
@@ -290,7 +229,6 @@ class CameraWidget(QMainWindow):
             self.spawned = False
             self.sprite = None
             print("Sprite hidden for calibration, saved position:", self.savedSpritePos)
-            # NEW: Hide ambient background when calibration starts.
             self.ambientVisible = False
 
     def respawnSprite(self, pos):
@@ -338,9 +276,6 @@ class CameraWidget(QMainWindow):
     def rectangles_intersect(self, x1, y1, w1, h1, x2, y2, w2, h2):
         return not (x1 + w1 <= x2 or x1 >= x2 + w2 or y1 + h1 <= y2 or y1 >= y2 + h2)
 
-    # --------------------------
-    # UI Event Handlers
-    # --------------------------
     def updateLowerLabel(self, value):
         self.lowerLabel.setText(f"Canny Lower Threshold: {value}")
         if self.spawned:
@@ -359,21 +294,12 @@ class CameraWidget(QMainWindow):
         self.bboxAcc = []
         self.bboxCount = 0
         self.freezeBoxes = False
-        # Reinitialize particle systems so effects work after recalibration.
         self.platform_glow_triggered = []
         self.platform_glow_color = []
         self.platform_particles = []
         self.coin_particles = []
         self.heart_particles = []
-        # Only clear ambient background if not spawned
-        if not self.spawned:
-            self.ambientVisible = False
-
-    def reinit_particle_systems(self):
-        if self.capturedCoords:
-            self.platform_glow_triggered = [False] * len(self.capturedCoords)
-            self.platform_glow_color = [None] * len(self.capturedCoords)
-            self.platform_particles = [[] for _ in range(len(self.capturedCoords))]
+        self.ambientVisible = False
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.KeyPress:
@@ -427,7 +353,6 @@ class CameraWidget(QMainWindow):
         self.medianCount = 0
         self.autoThresholdCalibrated = False
         print("Manual calibration initiated.")
-        # NEW: Hide ambient background upon calibration.
         self.ambientVisible = False
         self.reset_bbox_accumulation()
 
@@ -435,46 +360,18 @@ class CameraWidget(QMainWindow):
         self.autoCalibrateButton.setText("Auto Calibrate")
         if self.savedSpritePos is not None:
             self.respawnSprite(self.savedSpritePos)
-        # Reinitialize particle systems and re-enable ambient background
-        self.reinit_particle_systems()
-        self.ambientVisible = True
-        # Do not clear freezeBoxes here so that self.capturedCoords remains intact.
-        # Optionally, you could call self.reset_bbox_accumulation() if you want to start over.
-
-    # NEW: Helper methods to reset invulnerability and red tint.
+        self.reset_bbox_accumulation()
     def reset_invulnerability(self):
         self.invulnerable = False
 
     def reset_red_tint(self):
         self.red_tint = False
 
-    # NEW: Toggle the player sprite between sprite001 and sprite005.
-    def toggle_player_sprite(self):
-        if self.current_sprite == "sprite001":
-            self.current_sprite = "sprite005"
-        else:
-            self.current_sprite = "sprite001"
-        if self.current_sprite == "sprite001":
-            sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0001.png"
-        else:
-            sprite_path = r"C:\Users\LLR User\Desktop\your-childhood-game\Sprite-0005.png"
-        new_sprite = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
-        if new_sprite is not None:
-            self.sprite = new_sprite
-            self.sprite_height, self.sprite_width = new_sprite.shape[:2]
-            print(f"Player sprite toggled to {self.current_sprite}")
-        else:
-            print(f"Error: Could not load sprite from {sprite_path}")
-
-    # --------------------------
-    # Frame Processing
-    # --------------------------
     def updateFrame(self):
         ret, frame = self.cap.read()
         if not ret:
             return
 
-        # NEW: Ambient background update (draw only if ambientVisible is True).
         if self.ambientVisible:
             if self.ambient_particles is None:
                 self.ambient_particles = []
@@ -494,7 +391,6 @@ class CameraWidget(QMainWindow):
                     particle['x'] = random.uniform(0, frame.shape[1])
                 cv2.circle(frame, (int(particle['x']), int(particle['y'])), particle['radius'], particle['color'], thickness=-1)
 
-        # Process for edge detection.
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         gray_equalized = clahe.apply(gray)
@@ -556,11 +452,7 @@ class CameraWidget(QMainWindow):
             else:
                 smoothedBoxes = self.capturedCoords
         else:
-            # When spawned, still use the last capturedCoords (if available) for collision detection and effects.
-            if not self.capturedCoords:
-                smoothedBoxes = []
-            else:
-                smoothedBoxes = self.capturedCoords
+            smoothedBoxes = []
 
         if not self.spawned:
             for box in smoothedBoxes:
@@ -758,7 +650,123 @@ class CameraWidget(QMainWindow):
                 cv2.circle(disp, (cx, cy), particle['radius'], (0,215,255), thickness=-1)
         self.heart_particles = new_heart_particles
 
-        # NEW: Platform glow with particle effects.
+        if self.autoThresholdCalibrated and self.spawned:
+            frame_width = disp.shape[1]
+            for enemy in self.enemies:
+                enemy_width = self.enemySprite_width if self.enemySprite is not None else 50
+                enemy_height = self.enemySprite_height if self.enemySprite is not None else 50
+                in_platform = False
+                for platform in self.capturedCoords:
+                    if self.rectangles_intersect(enemy['x'], enemy['y'], enemy_width, enemy_height,
+                                                 platform[0], platform[1], platform[2], platform[3]):
+                        in_platform = True
+                        break
+                if in_platform:
+                    valid_spawn = False
+                    attempts = 0
+                    while not valid_spawn and attempts < 10:
+                        candidate_x = random.randint(0, frame_width - enemy_width)
+                        candidate_y = enemy['y']
+                        valid_spawn = True
+                        for platform in self.capturedCoords:
+                            if self.rectangles_intersect(candidate_x, candidate_y, enemy_width, enemy_height,
+                                                         platform[0], platform[1], platform[2], platform[3]):
+                                valid_spawn = False
+                                break
+                        if valid_spawn:
+                            enemy['x'] = candidate_x
+                        attempts += 1
+
+                predicted_x = enemy['x'] + enemy['direction'] * enemy['speed']
+                collision = False
+                for platform in self.capturedCoords:
+                    if self.rectangles_intersect(predicted_x, enemy['y'], enemy_width, enemy_height,
+                                                 platform[0], platform[1], platform[2], platform[3]):
+                        collision = True
+                        break
+                if collision:
+                    enemy['direction'] = -enemy['direction']
+                    predicted_x = enemy['x'] + enemy['direction'] * enemy['speed']
+                enemy['x'] = predicted_x
+
+                if enemy['x'] <= 0:
+                    enemy['x'] = 0
+                    enemy['direction'] = 1
+                elif enemy['x'] + enemy_width >= frame_width:
+                    enemy['x'] = frame_width - enemy_width
+                    enemy['direction'] = -1
+
+                ex, ey = int(enemy['x']), int(enemy['y'])
+                if self.enemySprite is not None:
+                    if self.enemySprite.shape[2] == 4:
+                        enemy_bgr = self.enemySprite[:, :, :3]
+                        alpha_channel = self.enemySprite[:, :, 3] / 255.0
+                        alpha_enemy = np.dstack([alpha_channel] * 3)
+                        if ey + enemy_height <= disp.shape[0] and ex + enemy_width <= disp.shape[1]:
+                            roi_enemy = disp[ey:ey+enemy_height, ex:ex+enemy_width]
+                            blended_enemy = (alpha_enemy * enemy_bgr.astype(float) + (1 - alpha_enemy) * roi_enemy.astype(float)).astype(np.uint8)
+                            disp[ey:ey+enemy_height, ex:ex+enemy_width] = blended_enemy
+                    else:
+                        if ey + enemy_height <= disp.shape[0] and ex + enemy_width <= disp.shape[1]:
+                            disp[ey:ey+enemy_height, ex:ex+enemy_width] = self.enemySprite
+
+                if not self.invulnerable and self.sprite is not None:
+                    player_x, player_y = self.x_offset, self.y_offset
+                    player_w, player_h = self.sprite_width, self.sprite_height
+                    if not (player_x + player_w <= enemy['x'] or player_x >= enemy['x'] + enemy_width or
+                            player_y + player_h <= enemy['y'] or player_y >= enemy['y'] + enemy_height):
+                        self.lives -= 1
+                        print("Player hit by enemy! Lives remaining:", self.lives)
+                        pygame.mixer.Sound.play(self.scream_sound)
+                        # NEW: Record the score in a CSV file when lives reach 0.
+                        if self.lives <= 0:
+                            with open("scores.csv", "a", newline="") as f:
+                                writer = csv.writer(f)
+                                writer.writerow(["player", self.score])
+                        heart_index = self.lives
+                        if self.heartSprite is not None:
+                            heart_w = self.heartSprite.shape[1]
+                            heart_h = self.heartSprite.shape[0]
+                        else:
+                            heart_w, heart_h = 30, 30
+                        heart_x = 10 + heart_index * (heart_w + 5)
+                        heart_y = 10
+                        for _ in range(10):
+                            particle = {
+                                'x': heart_x + heart_w/2,
+                                'y': heart_y + heart_h/2,
+                                'vx': random.uniform(-2, 2),
+                                'vy': random.uniform(-2, 0),
+                                'life': random.randint(30, 45),
+                                'max_life': 45,
+                                'radius': random.randint(1, 3)
+                            }
+                            self.heart_particles.append(particle)
+                        self.invulnerable = True
+                        self.red_tint = True
+                        QTimer.singleShot(1000, self.reset_invulnerability)
+                        QTimer.singleShot(1000, self.reset_red_tint)
+                        enemy['x'] = random.randint(0, frame_width - enemy_width)
+                        enemy['direction'] = random.choice([-1, 1])
+                        if self.lives <= 0:
+                            print("No lives left! Game Over.")
+                            self.cap.release()
+                            import subprocess
+                            subprocess.Popen(["python", "start.py"])
+                            QApplication.quit()
+
+        new_heart_particles = []
+        for particle in self.heart_particles:
+            particle['x'] += particle['vx']
+            particle['y'] += particle['vy']
+            particle['life'] -= 1
+            if particle['life'] > 0:
+                new_heart_particles.append(particle)
+                cx = int(particle['x'])
+                cy = int(particle['y'])
+                cv2.circle(disp, (cx, cy), particle['radius'], (0,215,255), thickness=-1)
+        self.heart_particles = new_heart_particles
+
         if self.freezeBoxes and hasattr(self, 'platform_glow_triggered') and self.spawned and self.sprite is not None:
             tolerance = 5
             player_bottom = self.y_offset + self.sprite_height
@@ -790,25 +798,6 @@ class CameraWidget(QMainWindow):
                         cy = int(particle['y'])
                         cv2.circle(disp, (cx, cy), particle['radius'], self.platform_glow_color[i], thickness=-1)
                 self.platform_particles[i] = new_particles
-
-        # NEW: Check if player is standing on the highest bounding box.
-        if self.spawned and self.capturedCoords:
-            highest_box = min(self.capturedCoords, key=lambda box: box[1])
-            tolerance = 5
-            player_bottom = self.y_offset + self.sprite_height
-            horizontal_intersect = (self.x_offset + self.sprite_width > highest_box[0] and
-                                    self.x_offset < highest_box[0] + highest_box[2])
-            if horizontal_intersect and abs(player_bottom - highest_box[1]) < tolerance:
-                if self.on_highest_since is None:
-                    self.on_highest_since = time.time()
-                else:
-                    elapsed = time.time() - self.on_highest_since
-                    if elapsed >= 5:
-                        self.toggle_player_sprite()
-                        # Reset the timer so that every additional 5 seconds a toggle occurs.
-                        self.on_highest_since = time.time()
-            else:
-                self.on_highest_since = None
 
         self.lastFrame = disp
         height, width, channel = disp.shape
@@ -905,16 +894,11 @@ class CameraWidget(QMainWindow):
         self.cap.release()
         event.accept()
 
-    # NEW: Helper Method to update key state from the serial input.
     def updateKeyState(self, key, state):
         if key in self.key_state:
             self.key_state[key] = state
             print(f"Key state for '{key}' updated to {state}")
 
-# ------------------------------------------------------------------------------
-# NEW: SerialReaderThread to integrate the microcontroller client code.
-# Reads from the serial port and emits a signal with the key and its state.
-# ------------------------------------------------------------------------------
 class SerialReaderThread(QThread):
     key_signal = pyqtSignal(str, bool)
 
@@ -959,9 +943,6 @@ class SerialReaderThread(QThread):
         self._running = False
         self.wait()
 
-# ------------------------------------------------------------------------------
-# NEW: Event filter to trigger auto calibration on 'c' key press.
-# ------------------------------------------------------------------------------
 from PyQt5.QtCore import QObject
 
 class AutoCalibrateKeyFilter(QObject):
@@ -972,25 +953,16 @@ class AutoCalibrateKeyFilter(QObject):
                 return True
         return super().eventFilter(obj, event)
 
-# ------------------------------------------------------------------------------
-# Main Application Entry Point
-# ------------------------------------------------------------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CameraWidget()
-
-    # Create and start the serial reader thread.
     serial_thread = SerialReaderThread("COM6", 115200)
     serial_thread.key_signal.connect(window.updateKeyState)
     serial_thread.start()
-
-    # NEW: Install auto calibration key filter for 'c' key press.
     autoCalibFilter = AutoCalibrateKeyFilter()
     window.installEventFilter(autoCalibFilter)
 
     window.showMaximized()
     exit_code = app.exec_()
-
-    # On exit, stop the serial thread.
     serial_thread.stop()
     sys.exit(exit_code)
