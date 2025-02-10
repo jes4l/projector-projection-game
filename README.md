@@ -2,9 +2,11 @@
 
 This is my project that won the Hackiest Hack at [Royal Hackaway V8](https://www.royalhackaway.com/) and here is my [devpost](https://devpost.com/software/projector-projection-game).
 
-[Image2](20250209_123815.jpg)
-[Image2](20250209_131709.jpg)
-[Image3](20250209_131716.jpg)
+![Image2](20250209_123815.jpg)
+
+![Image2](20250209_131709.jpg)
+
+![Image3](20250209_131716.jpg)
 
 
 This After 24 hours, I created Projector Projection Game, a Python platform game that uses real objects for level design. The objective of the game is to find objects, such as books, sticky notes, photo frames, your arm, etc, that you can use to jump on to reach the coin.
